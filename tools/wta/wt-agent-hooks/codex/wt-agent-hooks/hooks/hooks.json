@@ -1,0 +1,45 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "try { wtcli.exe agent-hook --cli-source codex --event agent.session.start } catch { }; exit 0"
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "try { wtcli.exe agent-hook --cli-source codex --event agent.notification } catch { }; exit 0"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "try { wtcli.exe agent-hook --cli-source codex --event agent.prompt.submit } catch { }; exit 0"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "try { wtcli.exe agent-hook --cli-source codex --event agent.stop } catch { }; exit 0"
+          }
+        ]
+      }
+    ]
+  }
+}

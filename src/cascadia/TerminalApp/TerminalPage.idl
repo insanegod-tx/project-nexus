@@ -1,0 +1,260 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+import "TaskbarState.idl";
+import "Remoting.idl";
+import "Tab.idl";
+// Microsoft.Terminal.Protocol types are available via project reference (.winmd)
+
+namespace TerminalApp
+{
+    [default_interface] runtimeclass ContentManager
+    {
+        Microsoft.Terminal.Control.ControlInteractivity CreateCore(Microsoft.Terminal.Control.IControlSettings settings,
+                                                                   Microsoft.Terminal.Control.IControlAppearance unfocusedAppearance,
+                                                                   Microsoft.Terminal.TerminalConnection.ITerminalConnection connection);
+
+        Microsoft.Terminal.Control.ControlInteractivity TryLookupCore(UInt64 id);
+        void Detach(Microsoft.Terminal.Control.TermControl control);
+
+        void OnPaneAgentSessionChanged(String eventJson);
+        String AgentSessionEvent(UInt64 contentId);
+
+        void KeepTab(TerminalPage owner, Tab tab);
+        Boolean HasKeptSessions();
+        Boolean IsKeptContent(UInt64 contentId);
+        Guid KeptGroupForPane(Guid sessionId);
+        Windows.Foundation.Collections.IMapView<Guid, String> KeptGroups();
+        Windows.Foundation.Collections.IVectorView<TerminalPage> KeptPages();
+        Windows.Foundation.Collections.IVectorView<Tab> KeptTabs(TerminalPage owner);
+        TerminalPage KeptGroupOwner(Guid groupId);
+        Windows.Foundation.Rect KeptGroupBounds(Guid groupId);
+        Tab BeginReattachKeptGroup(Guid groupId);
+        void CompleteKeptGroupReattach(Guid groupId, Boolean committed);
+        void DiscardKeptGroup(Guid groupId);
+        event Windows.Foundation.TypedEventHandler<ContentManager, Object> KeptSessionsChanged;
+        event Windows.Foundation.TypedEventHandler<ContentManager, String> DetachedSessionEvent;
+        void DiscardAllKeptGroups();
+    }
+
+    [default_interface] runtimeclass RenameWindowRequestedArgs
+    {
+        String ProposedName { get; };
+    };
+    [default_interface] runtimeclass OpenWindowRequestedArgs
+    {
+        String Name { get; };
+    };
+    [default_interface] runtimeclass SummonWindowByIdRequestedArgs
+    {
+        UInt64 WindowId { get; };
+    };
+    [default_interface] runtimeclass RequestMoveContentArgs
+    {
+        String Window { get; };
+        String Content { get; };
+        UInt32 TabIndex { get; };
+        UInt64 TransferId { get; };
+        Windows.Foundation.IReference<Windows.Foundation.Point> WindowPosition { get; };
+    };
+
+    interface IDialogPresenter
+    {
+        Windows.Foundation.IAsyncOperation<Windows.UI.Xaml.Controls.ContentDialogResult> ShowDialog(Windows.UI.Xaml.Controls.ContentDialog dialog);
+    };
+
+    [default_interface] runtimeclass WindowProperties : Windows.UI.Xaml.Data.INotifyPropertyChanged
+    {
+        String WindowName { get; };
+        UInt64 WindowId { get; };
+        String WindowNameForDisplay { get; };
+        String WindowIdForDisplay { get; };
+
+        String VirtualWorkingDirectory { get; set; };
+        String VirtualEnvVars { get; set; };
+        Boolean IsQuakeWindow();
+    };
+
+    runtimeclass LaunchPositionRequest
+    {
+        Microsoft.Terminal.Settings.Model.LaunchPosition Position;
+    }
+
+    // ── Protocol structs moved to Microsoft.Terminal.Protocol.TerminalProtocol.idl ──
+
+    [default_interface] runtimeclass WindowListEntry
+    {
+        WindowListEntry();
+        UInt64 Id;
+        String Name;
+    }
+
+    // Raised by TerminalPage when it needs the list of open windows.
+    // The handler (AppHost) fills Entries synchronously.
+    [default_interface] runtimeclass WindowListRequest
+    {
+        Windows.Foundation.Collections.IVector<WindowListEntry> Entries { get; };
+    }
+
+    [default_interface] runtimeclass TerminalPage : Windows.UI.Xaml.Controls.Page, Windows.UI.Xaml.Data.INotifyPropertyChanged, Microsoft.Terminal.UI.IDirectKeyListener
+    {
+        TerminalPage(WindowProperties properties, ContentManager manager);
+
+        // XAML bound properties
+        String ApplicationDisplayName { get; };
+        String ApplicationVersion { get; };
+
+        Boolean FocusMode { get; };
+        Boolean Fullscreen { get; };
+        Boolean AlwaysOnTop { get; };
+
+        WindowProperties WindowProperties { get; };
+        void IdentifyWindow();
+
+        String SavedActionName { get; };
+        String SavedActionKeyChord { get; };
+        String SavedActionCommandLine { get; };
+
+        // We cannot use the default XAML APIs because we want to make sure
+        // that there's only one application-global dialog visible at a time,
+        // and because of GH#5224.
+        IDialogPresenter DialogPresenter;
+        void ShowKeyboardServiceWarning();
+        String KeyboardServiceDisabledText { get; };
+
+        TaskbarState TaskbarState{ get; };
+
+        Windows.UI.Xaml.Media.Brush TitlebarBrush { get; };
+        void WindowActivated(Boolean activated);
+        void SendContentToOther(RequestReceiveContentArgs args);
+
+        event Windows.Foundation.TypedEventHandler<Object, Object> TitleChanged;
+        event Windows.Foundation.TypedEventHandler<Object, Object> CloseWindowRequested;
+        event Windows.Foundation.TypedEventHandler<Object, Windows.UI.Xaml.UIElement> SetTitleBarContent;
+        event Windows.Foundation.TypedEventHandler<Object, Object> FocusModeChanged;
+        event Windows.Foundation.TypedEventHandler<Object, Object> FullscreenChanged;
+        event Windows.Foundation.TypedEventHandler<Object, Object> AlwaysOnTopChanged;
+        event Windows.Foundation.TypedEventHandler<Object, Object> Initialized;
+        event Windows.Foundation.TypedEventHandler<Object, Object> SetTaskbarProgress;
+        event Windows.Foundation.TypedEventHandler<Object, Object> IdentifyWindowsRequested;
+        event Windows.Foundation.TypedEventHandler<Object, RenameWindowRequestedArgs> RenameWindowRequested;
+        event Windows.Foundation.TypedEventHandler<Object, Object> SummonWindowRequested;
+        event Windows.Foundation.TypedEventHandler<Object, SummonWindowByIdRequestedArgs> SummonWindowByIdRequested;
+        event Windows.Foundation.TypedEventHandler<Object, Microsoft.Terminal.Control.WindowSizeChangedEventArgs> WindowSizeChanged;
+
+        event Windows.Foundation.TypedEventHandler<Object, Object> OpenSystemMenu;
+        event Windows.Foundation.TypedEventHandler<Object, Microsoft.Terminal.Control.ShowWindowArgs> ShowWindowChanged;
+        event Windows.Foundation.TypedEventHandler<Object, Windows.Foundation.Collections.IVectorView<Microsoft.Terminal.Settings.Model.SettingsLoadWarnings> > ShowLoadWarningsDialog;
+
+        event Windows.Foundation.TypedEventHandler<Object, RequestMoveContentArgs> RequestMoveContent;
+        event Windows.Foundation.TypedEventHandler<Object, RequestReceiveContentArgs> RequestReceiveContent;
+
+        event Windows.Foundation.TypedEventHandler<Object, LaunchPositionRequest> RequestLaunchPosition;
+        event Windows.Foundation.TypedEventHandler<Object, WindowListRequest> RequestWindowList;
+
+        // Raised when the page wants the monarch to open (or summon) a
+        // named window in-process, restoring its persisted workspace if
+        // one exists. No new wt.exe process is spawned.
+        event Windows.Foundation.TypedEventHandler<Object, OpenWindowRequestedArgs> RequestOpenWindow;
+
+        event Windows.Foundation.TypedEventHandler<Object, WindowRequestedArgs> RequestNewWindow;
+
+        // Terminal Protocol Bridge Methods
+        UInt32 TabCount { get; };
+        Windows.Foundation.IReference<UInt32> FocusedTabIndex { get; };
+        Windows.Foundation.IAsyncOperation<Microsoft.Terminal.Protocol.PaneInfo> GetProtocolActivePane();
+        Windows.Foundation.IAsyncOperation<Windows.Foundation.Collections.IVector<Microsoft.Terminal.Protocol.TabInfo> > GetProtocolTabs();
+        Windows.Foundation.IAsyncOperation<Windows.Foundation.Collections.IVector<Microsoft.Terminal.Protocol.PaneInfo> > GetProtocolPanes(UInt32 tabIdFilter);
+        Windows.Foundation.IAsyncOperation<Microsoft.Terminal.Protocol.PaneOutput> ReadProtocolPaneOutput(Guid sessionId, String source, Int32 maxLines);
+        Windows.Foundation.IAsyncOperation<Microsoft.Terminal.Protocol.PaneContext> GetProtocolPaneContext(Guid sourceSessionId, Boolean hasExplicitSource, Int32 maxLines, Int32 maxCharacters);
+        Windows.Foundation.IAsyncOperation<Microsoft.Terminal.Protocol.ProcessStatus> GetProtocolProcessStatus(Guid sessionId);
+        Windows.Foundation.IAsyncOperation<Microsoft.Terminal.Protocol.SessionVariable> GetProtocolSessionVariable(Guid sessionId, String name);
+        Windows.Foundation.IAsyncOperation<Boolean> SetProtocolSessionVariable(Guid sessionId, String name, String value);
+        Windows.Foundation.IAsyncOperation<Microsoft.Terminal.Protocol.TabCreationResult> CreateProtocolTab(Microsoft.Terminal.Settings.Model.NewTerminalArgs args, Boolean background);
+        Windows.Foundation.IAsyncOperation<Microsoft.Terminal.Protocol.TabCreationResult> SplitProtocolPane(Guid sessionId, Microsoft.Terminal.Settings.Model.SplitDirection direction, Single size, Microsoft.Terminal.Settings.Model.NewTerminalArgs args, Boolean background);
+        Windows.Foundation.IAsyncOperation<Boolean> CloseProtocolPane(Guid sessionId);
+        Windows.Foundation.IAsyncOperation<Boolean> SendProtocolInput(Guid sessionId, String text);
+        Windows.Foundation.IAsyncOperation<Boolean> FocusProtocolPane(Guid sessionId);
+        event Windows.Foundation.TypedEventHandler<Object, String> ProtocolVtSequenceReceived;
+
+        // Inbound event from WTA carrying {method:"autofix_state",params:{state,pane_id,...}}
+        // Called by the COM server on the UI thread after receiving a SendEvent from WTA.
+        void OnAutofixStateChanged(String eventJson);
+
+        // Inbound event from WTA carrying {method:"agent_status",params:{name,version,model,state}}.
+        // Called by the COM server on the UI thread; the page forwards the values
+        // to the AgentPaneContent so the XAML agent bar can refresh.
+        void OnAgentStatusChanged(String eventJson);
+        void OnAgentAvailabilityChanged(String eventJson);
+
+        // Inbound event from `/agent` carrying
+        // {method:"switch_agent",params:{window_id,tab_id,agent_id}}.
+        // Applies a runtime override and rebinds the target tab's helper when
+        // the execution source is unchanged.
+        void OnAgentSwitchRequested(String eventJson);
+
+        // Inbound event from WTA carrying {method:"close_agent_pane",params:{...}}.
+        // Emitted when the user presses Ctrl+C twice in the agent pane TUI.
+        // The page tears down the shared agent pane; wta dies with its ConPty.
+        void OnCloseAgentPaneRequested(String eventJson);
+
+        // Inbound event from WTA carrying
+        // {method:"request_default_paste",params:{window_id,tab_id,pane_id}}.
+        // Routes WTA's no-selection right-click through the existing host paste action.
+        void OnDefaultPasteRequested(String eventJson);
+
+        // Inbound event from WTA carrying
+        // {method:"agent_state_changed",params:{tab_id,view,pane_open}}.
+        // Per-tab agent-pane UI snapshot — the page-side handler routes by
+        // `tab_id` to the matching AgentPaneContent (creating or tearing
+        // down the pane on that tab as needed).
+        void OnAgentStateChanged(String eventJson);
+
+        // Inbound event from WTA carrying
+        // {method:"resume_in_new_agent_tab",
+        //  params:{window_id,session_id,cwd,agent_id,agent_model,
+        //          agent_source,wsl_distro}}.
+        // Emitted by the session view's Enter handler. The page reserves
+        // the exact provider before creating a tab, then starts its agent
+        // pane with a bundled ACP `session/load`.
+        void OnResumeInNewAgentTabRequested(String eventJson);
+
+        // Inbound event from a hookless WTA delegate carrying
+        // {method:"pane_agent_session_changed",
+        //  params:{pane_id,agent_session_id,resume_commandline}}.
+        // Records the known pane/agent binding so a persisted layout can
+        // resume the agent CLI even when no agent hook is installed.
+        void OnPaneAgentSessionChanged(String eventJson);
+
+        // Inbound event from WTA carrying
+        // {method:"set_agent_chip_target",params:{tab_id, pane_session_id?}}.
+        // Helper override for which pane in the tab gets the blue "Agent"
+        // chip. A missing or null pane_session_id reverts that tab to the
+        // default chip behavior (driven by the source-of-agent flag).
+        void OnAgentChipTargetChanged(String eventJson);
+
+        // Inbound event from WTA carrying {method:"restart_agent_stack"}.
+        // Emitted by the `/restart` slash command. The page tears down
+        // every agent pane, force-restarts the wta-master process via
+        // `SharedWta::Restart()` (bypassing the AcquirePane refcount),
+        // and re-toggles the active tab's pane so the user lands on a
+        // fresh agent CLI session under the same stable master pipe.
+        void OnRestartAgentStackRequested(String eventJson);
+
+        // Inbound completion for a destructive agent-session retirement:
+        // {method:"agent_sessions_retired",params:{operation_id,success,reason,failed_tabs}}.
+        void OnAgentSessionsRetired(String eventJson);
+
+        // Inbound notification that the master Session Registry changed.
+        // Refreshes an open Sidebar History view immediately; the periodic
+        // refresh remains as a missed-notification fallback.
+        void OnSessionRegistryChanged(String eventJson);
+
+        // Runtime-only whole-tab policy, keyed by Tab.StableId, not its mutable index.
+        // Direct pane close always terminates that pane.
+        Boolean CanKeepTabRunning(Guid tabId);
+        Boolean IsTabKeepRunning(Guid tabId);
+        void SetTabKeepRunning(Guid tabId, Boolean enabled);
+        Boolean RestoreKeptGroup(Guid groupId);
+        void ShutdownPanes();
+    }
+}

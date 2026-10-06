@@ -1,0 +1,269 @@
+# Setup screen titles
+# {Locked="Intelligent Terminal"} - product name, do not translate
+setup.title.agent_missing: "Agenten vart ikkje funnen"
+setup.title.agent_error: "Tilkoplinga til agenten mislukkast"
+setup.title.not_available: "Agenten er ikkje tilgjengeleg"
+setup.title.sign_in: "Pålogging er påkravd"
+
+# %{agent} is replaced with the agent display name at runtime.
+setup.subtitle.copilot_missing: "Agenten din \"%{agent}\" er ikkje installert. Følg stega nedanfor for å installere han. For å byte agent, gå til Intelligent Terminal Settings > Agent."
+setup.subtitle.agent_missing: "Agenten din \"%{agent}\" er ikkje installert. Installer han på nytt manuelt, og prøv deretter igjen. For å byte agent, gå til Intelligent Terminal Settings > Agent."
+setup.subtitle.copilot_auth: "Agenten din \"%{agent}\" krev autentisering. Følg stega nedanfor for å logge inn. For å byte agent, gå til Intelligent Terminal Settings > Agent."
+setup.subtitle.agent_auth: "Agenten din \"%{agent}\" krev autentisering. Logg inn via agenten, og vel deretter \"Eg har logga inn\" nedanfor. For å byte agent, gå til Intelligent Terminal Settings > Agent."
+setup.subtitle.connection_failed: "Vi kunne ikkje starte %{agent}."
+
+# {Locked="Intelligent Terminal"}
+
+setup.option.install: "Installer %{agent}"
+setup.option.install_hint: "(Vert installert automatisk)"
+setup.option.signin: "Logg inn på %{agent}"
+setup.option.retry_detection: "Prøv igjen"
+setup.option.retry_auth: "Eg har logga inn — prøv å kople til igjen"
+setup.option.retry_connection: "Prøv å kople til igjen"
+setup.status.installing: "Installerer..."
+setup.status.installing_copilot_cli: "Installerer GitHub Copilot CLI"
+setup.status.connecting_agent: "Koplar til %{agent}"
+setup.status.install_failed: "Installasjonen mislukkast: "
+setup.status.installing_winget: " Installerer via winget..."
+setup.error.install_start_failed: "Installasjonsprogrammet kunne ikkje startast. Vel \"Prøv igjen\" for å prøve på nytt."
+setup.error.install_timed_out: "Tidsavbrot under installasjonen. Vel \"Prøv igjen\" før du startar ein ny installasjon."
+setup.error.install_detection_timed_out: "Installasjonen er fullført, men Copilot er ikkje synleg enno. Vel \"Prøv igjen\" for å kontrollere på nytt."
+
+# ── Auth flow (src/ui/auth.rs) ──────────────────────────────────────────────
+# {Locked="CLI"} - acronym, common usage across Microsoft localizations
+auth.agent_selected: "Agent %{name} er vald"
+auth.agent_selected_with_status: "Agent %{name} — "
+auth.checking_authentication: "  %{spinner} Kontrollerer autentisering..."
+auth.waiting_for_authorization: "  %{spinner} Ventar på autorisasjon..."
+auth.code_copied_hint: "  Koden er kopiert til utklippstavla — lim han inn i nettlesaren din."
+auth.device_code_prompt: "Gå til %{url} og skriv inn koden: %{code}"  # Copilot device-flow sign-in progress; %{url} is the verification URL, %{code} is the device code
+auth.card_connect: "  Kopla til %{name} for å aktivere agentfunksjonar"
+auth.enterprise_prompt: "  Enter for å logge på · E for GitHub Enterprise · Esc for å gå tilbake"  # {Locked="Enter","E","Esc"}
+auth.enterprise_domain_label: "  Enterprise-domene: "
+auth.enterprise_hint_footer: "  Enter for å logge på · Esc for github.com"  # {Locked="Enter","Esc","github.com"}
+auth.login_failed_help_enterprise: "  Trykk Enter for å prøve på nytt, eller Esc for github.com. Vanlege årsaker: eit feilskrive eller utilgjengeleg domene, ein utgått kode eller ingen Copilot-tilgang på den verten."  # {Locked="Enter","Esc","github.com","Copilot"}
+auth.login_failed_help_default: "  Trykk Enter for å prøve på nytt, eller Esc for å gå tilbake."  # {Locked="Enter","Esc"}
+
+# ── Chat view (src/ui/chat.rs) ──────────────────────────────────────────────
+chat.activity_thinking: "Tenkjer..."
+# {Locked="Intelligent Terminal"} - product name, do not translate
+chat.welcome_title: "Velkomen til Intelligent Terminal!"
+chat.welcome_disclaimer: "Intelligent Terminal brukar AI."
+chat.plan_header: "Plan:"
+chat.plan_marker_completed: "[x]"  # {Locked}
+chat.plan_marker_in_progress: "[>]"  # {Locked}
+chat.plan_marker_pending: "[ ]"  # {Locked}
+chat.autofix_prompt_label: "Nyleg kommandofeil diagnostisert automatisk"
+chat.turn_canceled: "(avbroten)"
+chat.turn_executed: "→ utført: %{title}"
+# Persistent tool-category labels shown after a status marker and before a subject.
+chat.tool_kind.run: "Køyr"
+chat.tool_kind.insert: "Set inn"
+chat.tool_kind.read: "Les"
+chat.tool_kind.search: "Søk"
+chat.tool_kind.edit: "Rediger"
+chat.tool_kind.delete: "Slett"
+chat.tool_kind.move: "Flytt"
+chat.tool_kind.fetch: "Hent"
+chat.tool_kind.think: "Tenk"
+chat.tool_kind.mode: "Modus"
+chat.tool_kind.other: "Verktøy"
+
+# ── Input placeholders (src/ui/input.rs) ────────────────────────────────────
+input.placeholder.connected: "Spør om kva som helst, / for kommandoar.."  # {Locked="/"}
+input.placeholder.connecting: "koplar til..."
+input.placeholder.disconnected: "fråkopla"
+input.image_attachments: "📎 Bilete: %{items}"  # {Locked="%{items}"} {Locked="📎"}
+
+# ── Command popup (src/ui/command_popup.rs) ─────────────────────────────────
+# {Locked="/"} - slash-command prefix, must remain ASCII
+commands.popup_title: " / kommandoar "
+commands.help_title: " Hjelp "
+commands.help_header: "Skråstrekkommandoar — skriv / i inndatafeltet."
+commands.help_escape_hint: "  //text     Send ein bokstavleg '/' (unngår kommandotolken)"  # {Locked="//text","/"}
+commands.help_close_hint: "  Esc        Lukk denne hjelpa"  # {Locked="Esc"}
+
+# ── Recommendations panel (src/ui/recommendations.rs) ───────────────────────
+# {Locked="Enter","Esc","↵","↑","↓","←","→"} - key names and Return-key glyph, do not translate
+recommendations.nav_hint: "(↑ ↓ for å navigere • ← → for å byte knappar • Enter for å velje • Esc for å avbryte)"
+recommendations.button_run_command: "[ Køyr kommando ]"
+recommendations.button_insert_in_terminal: "Set inn i Terminal"
+recommendations.button_open_in_new_tab: "Opne i ny fane ↵"
+recommendations.button_open_in_new_panel: "Opne i nytt panel ↵"
+recommendations.button_open_tab: "Opne fane ↵"
+recommendations.button_open_panel: "Opne panel ↵"
+recommendations.button_execute: "Utfør ↵"
+recommendations.agent_fallback: "agent"
+recommendations.open_and_send_display: "%{agent}: %{input}"
+recommendations.open_kind_tab: "fane"
+recommendations.open_kind_panel: "panel"
+recommendations.open_kind_panel_direction: "panel (%{direction})"
+recommendations.open_new_with_title_and_cwd: "Ny %{kind} (%{title}) i %{cwd}"
+recommendations.open_new_with_title: "Ny %{kind} (%{title})"
+recommendations.open_new_with_cwd: "Ny %{kind} i %{cwd}"
+recommendations.open_new_empty: "Ny tom %{kind}"
+
+# ── Permission dialog compact mode (src/ui/permission.rs) ───────────────────
+permission.compact.default_description: "Løyve førespurt"
+permission.compact.prefix: "[!] "  # {Locked}
+permission.compact.hint: "[Y/N for å svare · endre storleik for fullstendig kort]"  # {Locked="Y/N"}
+
+# ── Agent status (src/agent_check.rs) ───────────────────────────────────────
+agent.status.not_found: "Ikkje funnen"
+# {Locked="winget","GitHub.Copilot","GitHub","Copilot"} - tool names and command, must run verbatim
+agent.install.running_winget: "Running: winget install GitHub.Copilot"
+agent.install.launch_failed: "Failed to launch winget: %{error}"
+agent.install.winget_exited: "winget exited unexpectedly: %{error}"
+agent.install.winget_failed_code: "winget install failed (exit code %{code})"
+agent.install.unsupported: "Automatic install not supported for %{agent}"
+agent.custom.auth_hint: "Kontroller at %{name} er installert og på din PATH."  # {Locked="PATH"}
+
+# ── Agents view (src/ui/agents_view.rs) ─────────────────────────────────────
+agents.loading: "Lastar..."
+# {Locked="Enter","Esc","F5","↑","↓","/"} - key combinations, do not translate
+agents.footer_hint: "(↑ ↓ for å navigere • Enter for å starte økt • Esc for å avslutte • F5 for å oppdatere • / for å søkje)"
+agents.status.active: "Aktiv"
+agents.status.waiting_for_input: "Ventar på inndata"
+agents.status.error: "Feil"
+agents.status.idle: "Inaktiv"
+
+# ── Layout welcome hint (src/ui/layout.rs) ──────────────────────────────────
+layout.welcome_hint: "  (Ctrl+Shift+. for å vise/gøyme agentpanelet • Ctrl+Shift+/ for å vise/gøyme agentøkta)"  # {Locked="Ctrl+Shift+.","Ctrl+Shift+/"}
+
+# ── Connection state ────────────────────────────────────────────────────────
+# Preparing the AI agent connection, including preflight and reuse of a cached agent.
+connection.starting: "Førebur tilkopling til agenten..."
+# Retiring old AI agent sessions for /restart, before the next connection phases.
+connection.restarting: "Startar agenten på nytt..."
+connection.reconnecting: "Koplar til på nytt..."
+# Connecting the pane to WTA's local coordinator process, not to an AI model.
+connection.coordinator: "Koplar til den lokale koordinatoren..."
+# Initializing the helper/coordinator connection, including local preparation and AI agent initialization.
+connection.initializing: "Initialiserer tilkoplinga til agenten..."
+# Refreshing the user's authentication with the AI agent after login; not verifying the agent's identity.
+connection.authenticating: "Autentiserer brukaren hjå agenten..."
+# Reading the coordinator's registry snapshot, including existing history; not fetching history from the AI agent.
+connection.syncing_sessions: "Les øktlista..."
+# Creating the AI agent session, including local registration; internal agent progress is unknown.
+connection.creating_session: "Opprettar agentøkt..."
+# Applying the requested AI model before the connection is ready. Preserve %{model}.
+connection.selecting_model: "Set øktmodell: %{model}..."  # {Locked="%{model}"}
+# Activity row while connecting to restore a conversation. Keep the actual stage first so narrow panes show it; session_id is shortened to eight characters.
+connection.resuming_stage: "%{stage} (tek opp att %{session_id})"  # {Locked="%{stage}","%{session_id}"}
+connection.connecting_activity: "Koplar til agenten…"
+connection.lost: "Tilkoblinga til agenten gjekk tapt. Skriv /restart for å kople til på nytt."  # {Locked="/restart"}
+
+# ── System messages (src/app.rs) ────────────────────────────────────────────
+system.close_pane_hint: "Trykk Ctrl+C ein gong til for å lukke panelet"  # {Locked="Ctrl+C"}
+system.selection_copied: "Kopiert"  # Brief hint shown after selected terminal text is copied
+system.cancelled: "Avbrote."
+system.no_prompt_in_flight: "Ingen førespurnad pågår."
+system.authentication_failed: "Autentisering mislukkast"
+system.stopped_max_tokens: "Svaret blei avkorta etter at utdatagrensa til modellen blei nådd."
+system.stopped_max_turn_requests: "Agenten stoppa etter at førespurnadsgrensa for denne runden blei nådd."
+system.stopped_refusal: "Agenten avviste å halde fram med denne førespurnaden."
+system.agent_busy: "Agenten er oppteken i denne fana — vent til gjeldande ledetekst er ferdig."
+system.image_clipboard_empty: "Det finst ikkje noko bilete på utklippstavla å lime inn."
+system.image_not_supported: "Denne agenten støttar ikkje bileteinndata."
+system.image_pasted: "Bilete lagt ved (%{label}). Trykk Enter for å sende."  # {Locked="%{label}","Enter"}
+system.resuming_session: "Held fram med økta %{session_id}..."
+system.unknown_command: "Ukjend kommando \"%{command}\" — send som ledetekst. Skriv /help for lista."
+system.busy_use_stop: "Vent til gjeldande ledetekst er ferdig, eller bruk /stop først."
+system.cannot_focus_session: "Kan ikkje fokusera økta %{session_id}: ho ser ut til å vera aktiv, men ingen rute-GUID er bunden enno. Prøv igjen om ein augneblink."
+system.cannot_resume_no_load_session: "Kan ikkje halda fram i agentruta: %{agent} annonserte ikkje ACP `loadSession`-funksjonen."
+system.cannot_resume_no_resume_flag: "Kan ikkje halda fram %{agent}-økta: denne agenten har ikkje noko `--resume`-liknande flagg."
+system.cannot_resume_unknown_agent: "Kan ikkje halda fram økta %{session_id}: kjeldeagenten er ukjend for denne bygginga."
+system.cannot_resume_phantom_via_flag: "Kan ikkje halda fram %{agent}-økta %{session_id}: ho vart starta, men samla aldri opp nokon samtale, så %{agent} ville sjølv avvisa framhaldet. Fjernar rada."
+system.cannot_resume_phantom_via_load: "Kan ikkje halda fram %{agent}-økta %{session_id}: ho vart starta, men samla aldri opp nokon samtale, så %{agent} ville avvisa innlastinga. Fjernar rada."
+system.fallback.this_agent: "denne agenten"
+system.fallback.connected_agent: "den tilkopla agenten"
+
+# ── Runtime CLI output (src/main.rs) ────────────────────────────────────────
+output.no_windows: "Ingen vindauge funne."
+output.no_tabs: "Ingen faner funne."
+output.no_panes: "Ingen panel funne."
+output.no_windows_in_list: "Ingen vindauge funne"
+output.no_tabs_in_window: "Ingen faner funne i vindauge %{window_id}"
+# {Locked="WINDOW_ID","TAB_ID","PANE_ID","PID","ACTIVE","ROWS","COLS","FOCUSED","TITLE"} - column identifiers, kept ASCII for parsing
+output.header.windows: "WINDOW_ID    TITLE                          FOCUSED"
+output.header.tabs: "TAB_ID     TITLE                          FOCUSED"
+output.header.panes: "PANE_ID    PID      ACTIVE   ROWS       COLS"
+output.active_pane: "Aktivt panel: %{pane} (fane: %{tab}, vindauge: %{window})"
+output.pane_running: "Køyrer (PID: %{pid})"  # {Locked="PID"}
+output.pane_exited: "Avslutta (kode: %{code}, PID: %{pid})"  # {Locked="PID"}
+output.created_tab: "Oppretta fane %{tab_id} (panel %{pane_id})"
+output.created_pane: "Oppretta panel %{pane_id}"
+output.pane_closed: "Panel %{pane_id} lukka."
+
+# ── Errors (src/main.rs + src/agent_check.rs) ───────────────────────────────
+error.no_active_pane: "Ingen aktivt panel funne. Bruk -t for å oppgi ein panel-ID."  # {Locked="-t"}
+error.wt_com_clsid_not_set: "WT_COM_CLSID not set. Run inside a Windows Terminal pane."  # {Locked="WT_COM_CLSID","Windows Terminal"}
+error.unknown_shell_type: "Unknown shell type '%{shell}'. Use: bash, powershell, cmd, fish"  # {Locked="bash","powershell","cmd","fish"}
+# {Locked="wtcli wait-for"} - command name, do not translate
+error.wtcli_wait_for_spawn: "Failed to spawn wtcli wait-for"
+error.wtcli_wait_for_parse: "Failed to parse wtcli wait-for output"
+error.wtcli_wait_for_failed: "wtcli wait-for failed: %{stderr}"
+
+# ── Hooks status output (src/main.rs) ───────────────────────────────────────
+# {Locked="CLI","PATH","wt-agent-hooks","wta","wta hooks status","%LOCALAPPDATA%","IntelligentTerminal","wta-install-hooks.log"} - tool/CLI names, env vars, log file names
+hooks.bundle_source: "bundle source: %{source}%{path_suffix}"
+hooks.cli_not_on_path: "✗ CLI not on PATH"
+hooks.installed: "✓ installed"
+hooks.marketplace_path_stale: "⚠ marketplace path stale"
+hooks.installed_but_disabled: "⚠ installed but disabled"
+hooks.not_installed: "✗ not installed"
+hooks.uninstall_skipped: "skipped (CLI not on PATH)"
+hooks.install_succeeded: "✓ wt-agent-hooks installed for %{clis}"
+
+# ── Relative time and date formatting (src/ui/agents_view.rs) ───────────────
+time.just_now: "nett no"
+time.minute_singular: "%{count} minutt sidan"
+time.minutes_other: "%{count} minutt sidan"
+time.hour_singular: "%{count} time sidan"
+time.hours_other: "%{count} timar sidan"
+time.day_singular: "%{count} dag sidan"
+time.days_other: "%{count} dagar sidan"
+
+# ── Slash-command summaries (src/commands.rs) ─────────────────────────────
+# Command names (/help, /clear, etc.) stay English; descriptions translate.
+# {Locked="ACP","Ctrl+Shift+/"} - protocol name and shortcut, do not translate
+commands.help.summary: "Vis denne kommandolista"
+commands.clear.summary: "Tøm rulleloggen for chatten (beheld økta)"
+commands.new.summary: "Start ei ny ACP-økt (forkastar historikk)"  # {Locked="ACP"}
+commands.fix.summary: "Diagnostiser den aktive terminalen og føreslå ei løysing (/fix <hint>)"  # {Locked="/fix","<hint>"}
+commands.restart.summary: "Start agenten på nytt"
+commands.stop.summary: "Avbryt den pågåande førespurnaden"
+commands.sessions.summary: "Opne veljaren for historiske økter (Ctrl+Shift+/)"  # {Locked="Ctrl+Shift+/"}
+commands.agent.summary: "Vel agenten for dette panelet (/agent <id> for å byte direkte)"  # {Locked="/agent","<id>"}
+
+# ── Utføring av tilråding (src/coordinator.rs) ───────────────────────────
+system.choice_execution_failed: "Val %{choice} mislukkast: %{error}"
+
+# ── Agent picker (src/ui/agent_popup.rs) ────────────────────────────────────
+# {Locked="↑","↓","Enter","Esc"} - key names, do not translate
+agent_picker.title: "Vel agent (↑ ↓ • Enter • Esc)"  # Agent means an AI coding agent
+# Shown when no policy-allowed AI agent CLI is installed on the machine.
+system.no_agents: "Fann ingen tilgjengeleg agent-CLI på denne maskinen."  # {Locked="CLI"}
+# {agent} is the unrecognized text the user typed after /agent.
+system.agent_unknown: "Ukjend modell %{agent} — skriv /agent for å sjå lista over tilgjengelege."  # {Locked="/agent"}
+# Shown only when /agent is used outside a Windows Terminal-owned agent pane.
+system.agent_switch_unavailable: "Agentskifting er ikkje tilgjengeleg utanfor ei Windows Terminal-fane."
+
+# ── Model picker (/model) ───────────────────────────────────────────────────
+commands.model.summary: "Vel modellen for dette panelet (/model <id> for å byte direkte)"  # {Locked="/model","<id>"}
+commands.config.summary: "Konfigurer denne agentsesjonen"  # Agent means an AI coding agent; shown for the /config command. {Locked="/config"}
+commands.move.summary: "Flytt agentpanelet for denne fana (/move <position>)"  # {Locked="/move","<position>"}
+model_picker.title: "Vel modell (↑ ↓ • Enter • Esc)"  # {Locked="↑","↓","Enter","Esc"}
+system.no_models: "Den tilkopla agenten annonserte ingen modellar som kan veljast."
+system.model_set: "Modell for dette panelet sett til %{model}."  # {Locked="%{model}"}
+
+# ── Session configuration picker (src/ui/config_popup.rs) ───────────────────
+# {Locked="↑","↓","Enter","Esc","ACP"} - key names and protocol name
+config_picker.title: "Sesjonskonfigurasjon (↑ ↓ • Enter • Esc)"
+# Shown when /config is used but the AI agent exposed no ACP select options.
+system.no_config_options: "Den tilknytta agenten annonserte ingen konfigurerbare sesjonsalternativ."
+# {option} is an Agent-provided option name; {error} is the ACP error.
+system.config_update_failed: "Klarte ikkje å oppdatere %{option}: %{error}"
+system.yolo_disable_pending: "AI-agentleverandøren har ikkje stadfesta at økta er i den påkravde ikkje-privilegerte tilstanden"  # Shown after the localized failure prefix while prompts remain blocked until the AI agent provider confirms that its privileged session mode is off. Provider means an AI agent provider, not a network provider.
+system.provider_command_blocked_by_policy: "%{command}: Automatisk godkjenning er deaktivert av organisasjonens policy."  # {Locked="%{command}"} Shown when AllowAutomaticApproval blocks a provider-advertised privileged command.
+system.model_unknown: "Ukjend modell %{model} — skriv /model for å sjå lista over tilgjengelege."  # {Locked="%{model}","/model"}

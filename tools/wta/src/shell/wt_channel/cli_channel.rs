@@ -1,0 +1,1442 @@
+use std::future::Future;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+
+use anyhow::{anyhow, bail, Context};
+use tokio::sync::{mpsc, oneshot};
+
+use super::WtChannel;
+use crate::app_contracts::DebugMessage;
+
+const WTCLI_ONE_SHOT_TIMEOUT: Duration = Duration::from_secs(30);
+const WTCLI_ONE_SHOT_REAP_TIMEOUT: Duration = Duration::from_secs(2);
+const WTCLI_LISTENER_RETRY_INITIAL: Duration = Duration::from_millis(250);
+const WTCLI_LISTENER_RETRY_MAX: Duration = Duration::from_secs(5);
+const WTCLI_LISTENER_READY_TIMEOUT: Duration = Duration::from_secs(15);
+const WTCLI_LISTENER_STDERR_MAX: usize = 16 * 1024;
+const WTCLI_LISTENER_MAX_CONSECUTIVE_FAILURES: u32 = 8;
+const WTCLI_LISTENER_STABLE_UPTIME: Duration = Duration::from_secs(30);
+
+#[derive(Debug)]
+enum WtcliOneShotError {
+    Spawn(std::io::Error),
+    Wait(std::io::Error),
+    ReadStdout(std::io::Error),
+    ReadStderr(std::io::Error),
+    TimedOut {
+        timeout: Duration,
+        kill_error: Option<std::io::Error>,
+        reap_error: Option<std::io::Error>,
+        reap_timeout: Option<Duration>,
+    },
+}
+
+impl std::fmt::Display for WtcliOneShotError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Spawn(error) => write!(f, "failed to spawn wtcli: {error}"),
+            Self::Wait(error) => write!(f, "failed to wait for wtcli: {error}"),
+            Self::ReadStdout(error) => write!(f, "failed to read wtcli stdout: {error}"),
+            Self::ReadStderr(error) => write!(f, "failed to read wtcli stderr: {error}"),
+            Self::TimedOut {
+                timeout,
+                kill_error,
+                reap_error,
+                reap_timeout,
+            } => {
+                write!(f, "wtcli timed out after {timeout:?}")?;
+                if let Some(error) = kill_error {
+                    write!(f, "; kill failed: {error}")?;
+                }
+                if let Some(error) = reap_error {
+                    write!(f, "; reap failed: {error}")?;
+                }
+                if let Some(timeout) = reap_timeout {
+                    write!(f, "; reap timed out after {timeout:?}")?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+impl std::error::Error for WtcliOneShotError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Spawn(error)
+            | Self::Wait(error)
+            | Self::ReadStdout(error)
+            | Self::ReadStderr(error) => Some(error),
+            Self::TimedOut { .. } => None,
+        }
+    }
+}
+
+pub(crate) fn request_outcome_unknown(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<WtcliOneShotError>()
+        .is_some_and(|error| !matches!(error, WtcliOneShotError::Spawn(_)))
+        || error.downcast_ref::<serde_json::Error>().is_some()
+}
+
+async fn read_pipe<R>(pipe: Option<R>) -> std::io::Result<Vec<u8>>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::AsyncReadExt;
+
+    let mut bytes = Vec::new();
+    if let Some(mut pipe) = pipe {
+        pipe.read_to_end(&mut bytes).await?;
+    }
+    Ok(bytes)
+}
+
+/// Drain a pipe to EOF while retaining only a bounded diagnostic prefix.
+///
+/// `AsyncReadExt::take` would bound memory but stop draining after the limit;
+/// a noisy long-lived child could then block forever when the OS pipe fills.
+/// Keep consuming and discard the tail instead.
+async fn read_pipe_bounded<R>(pipe: Option<R>, max_bytes: usize) -> std::io::Result<(Vec<u8>, bool)>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::AsyncReadExt;
+
+    let mut retained = Vec::with_capacity(max_bytes);
+    let mut truncated = false;
+    if let Some(mut pipe) = pipe {
+        let mut chunk = [0u8; 4096];
+        loop {
+            let read = pipe.read(&mut chunk).await?;
+            if read == 0 {
+                break;
+            }
+            let remaining = max_bytes.saturating_sub(retained.len());
+            let keep = remaining.min(read);
+            retained.extend_from_slice(&chunk[..keep]);
+            truncated |= keep < read;
+        }
+    }
+    Ok((retained, truncated))
+}
+
+async fn run_wtcli_one_shot(
+    path: &str,
+    args: &[String],
+    capture_stdout: bool,
+    capture_stderr: bool,
+    timeout: Duration,
+) -> Result<std::process::Output, WtcliOneShotError> {
+    let mut command = tokio::process::Command::new(path);
+    command
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(if capture_stdout {
+            std::process::Stdio::piped()
+        } else {
+            std::process::Stdio::null()
+        })
+        .stderr(if capture_stderr {
+            std::process::Stdio::piped()
+        } else {
+            std::process::Stdio::null()
+        })
+        .kill_on_drop(true);
+
+    let mut child = command.spawn().map_err(WtcliOneShotError::Spawn)?;
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    // Keep process completion and both pipe readers under one deadline. If it
+    // expires, dropping this future closes the readers before cleanup starts.
+    let completed = tokio::time::timeout(timeout, {
+        let child = &mut child;
+        async move { tokio::join!(child.wait(), read_pipe(stdout), read_pipe(stderr),) }
+    })
+    .await;
+
+    match completed {
+        Ok((status, stdout, stderr)) => Ok(std::process::Output {
+            status: status.map_err(WtcliOneShotError::Wait)?,
+            stdout: stdout.map_err(WtcliOneShotError::ReadStdout)?,
+            stderr: stderr.map_err(WtcliOneShotError::ReadStderr)?,
+        }),
+        Err(_) => {
+            let kill_error = child.start_kill().err();
+            let (reap_error, reap_timeout) =
+                match tokio::time::timeout(WTCLI_ONE_SHOT_REAP_TIMEOUT, child.wait()).await {
+                    Ok(Ok(_)) => (None, None),
+                    Ok(Err(error)) => (Some(error), None),
+                    Err(_) => (None, Some(WTCLI_ONE_SHOT_REAP_TIMEOUT)),
+                };
+            Err(WtcliOneShotError::TimedOut {
+                timeout,
+                kill_error,
+                reap_error,
+                reap_timeout,
+            })
+        }
+    }
+}
+
+fn spawn_wtcli_task<F>(task: F)
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+        drop(runtime.spawn(task));
+    } else {
+        std::thread::spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    tracing::warn!(target: "wtcli", %error, "failed to create wtcli task runtime");
+                    return;
+                }
+            };
+            runtime.block_on(task);
+        });
+    }
+}
+
+/// Extract a JSON value as a string, handling both String and Number types.
+/// Protocol IDs may arrive as either strings or numbers depending on the caller.
+fn json_id_as_str(v: &serde_json::Value) -> Option<String> {
+    match v {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
+}
+
+fn is_listener_ready_marker(value: &serde_json::Value, token: &str) -> bool {
+    value.get("_wtcli").and_then(|value| value.as_str()) == Some("listener_ready")
+        && value.get("token").and_then(|value| value.as_str()) == Some(token)
+}
+
+struct ListenerRetryState {
+    failures: u32,
+    delay: Duration,
+}
+
+impl ListenerRetryState {
+    fn new() -> Self {
+        Self {
+            failures: 0,
+            delay: WTCLI_LISTENER_RETRY_INITIAL,
+        }
+    }
+
+    /// None stops this reader; zero retries immediately. Only time spent
+    /// subscribed counts as healthy, not process startup or pipe cleanup time.
+    fn after_failure(&mut self, subscribed_uptime: Option<Duration>) -> Option<Duration> {
+        if subscribed_uptime.is_some_and(|uptime| uptime >= WTCLI_LISTENER_STABLE_UPTIME) {
+            self.failures = 0;
+            self.delay = WTCLI_LISTENER_RETRY_INITIAL;
+        }
+        self.failures = self.failures.saturating_add(1);
+        if self.failures >= WTCLI_LISTENER_MAX_CONSECUTIVE_FAILURES {
+            return None;
+        }
+        if subscribed_uptime.is_some() && self.failures == 1 {
+            return Some(Duration::ZERO);
+        }
+        let delay = self.delay;
+        self.delay = (self.delay * 2).min(WTCLI_LISTENER_RETRY_MAX);
+        Some(delay)
+    }
+}
+
+/// Resolve the full path to `wtcli.exe` at startup.
+pub(crate) fn resolve_wtcli_path() -> String {
+    // 1. Explicit override via environment variable.
+    if let Ok(p) = std::env::var("WT_WTCLI_PATH") {
+        if std::path::Path::new(&p).exists() {
+            return p;
+        }
+    }
+
+    if let Ok(exe) = std::env::current_exe() {
+        // 2. Sibling of current exe (installed scenario: wta.exe and wtcli.exe co-located).
+        if let Some(dir) = exe.parent() {
+            let sibling = dir.join("wtcli.exe");
+            if sibling.exists() {
+                return sibling.to_string_lossy().to_string();
+            }
+        }
+
+        // 3. Walk up from exe to repo root, check bin/x64/{Debug,Release}/wtcli/wtcli.exe (dev builds).
+        //    The project output directory (wtcli/) contains the .winmd needed for MBM marshaling.
+        let mut cursor = exe.parent().map(|p| p.to_path_buf());
+        while let Some(dir) = cursor {
+            for sub in &[
+                "bin/x64/Debug/wtcli/wtcli.exe",
+                "bin/x64/Release/wtcli/wtcli.exe",
+            ] {
+                let candidate = dir.join(sub);
+                if candidate.exists() {
+                    return candidate.to_string_lossy().to_string();
+                }
+            }
+            let parent = dir.parent().map(|p| p.to_path_buf());
+            if parent.as_deref() == Some(dir.as_path()) {
+                break;
+            }
+            cursor = parent;
+        }
+    }
+
+    // 4. Fall back to PATH search.
+    "wtcli".to_string()
+}
+
+/// Classification of a `wtcli focus-pane` failure. Lets wta tell apart
+/// "pane GUID is no longer in any window" (caller should demote the
+/// stale row) from transient/infrastructure failures (caller should
+/// leave the row alone).
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FocusPaneFailureReason {
+    /// Confirmed: the COM server iterated all windows/pages and no pane
+    /// matched the supplied GUID. WT signals this via
+    /// `HRESULT_FROM_WIN32(ERROR_NOT_FOUND)` (= 0x80070490). Safe to demote.
+    NotFound,
+    /// Generic non-zero exit (legacy `E_FAIL` from older WT builds, RPC
+    /// failure, broken wtcli install, etc.). Caller should NOT demote on this
+    /// because the pane may still be live — log only.
+    Other {
+        exit_code: Option<i32>,
+        stderr: String,
+    },
+}
+
+/// Run `wtcli focus-pane -t <id>` on a background task and log stdout/stderr
+/// on failure. Replaces `spawn_wtcli_async` for the focus-pane case so that
+/// silent failures (wrong GUID, dead pane, COM error) leave a trace in
+/// wta-main.log.
+///
+/// Thin wrapper over `spawn_wtcli_focus_pane_with_callback` for callers that
+/// don't care about distinguishing failure modes.
+pub fn spawn_wtcli_focus_pane(pane_session_id: &str) {
+    spawn_wtcli_focus_pane_with_callback(pane_session_id, None);
+}
+
+/// Same as `spawn_wtcli_focus_pane` but invokes `on_failure` from the background
+/// task when the spawned wtcli process exits non-zero. Used by
+/// `dispatch_focus_pane` to demote stale-IDLE rows back to `Ended` when the
+/// underlying pane is gone (`FocusPaneFailureReason::NotFound`).
+#[allow(dead_code)]
+pub fn spawn_wtcli_focus_pane_with_callback(
+    pane_session_id: &str,
+    on_failure: Option<Box<dyn FnOnce(FocusPaneFailureReason) + Send + 'static>>,
+) {
+    let path = resolve_wtcli_path();
+    let pane = pane_session_id.to_string();
+    spawn_wtcli_task(async move {
+        let args = ["focus-pane".to_string(), "-t".to_string(), pane.clone()];
+        match run_wtcli_one_shot(&path, &args, true, true, WTCLI_ONE_SHOT_TIMEOUT).await {
+            Ok(out) => {
+                let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+                if out.status.success() {
+                    tracing::info!(
+                        target: "wtcli",
+                        target_pane = %pane,
+                        "focus-pane succeeded",
+                    );
+                } else {
+                    let exit_code = out.status.code();
+                    // wtcli prints `FocusPane failed: 0x80070490` for
+                    // ERROR_NOT_FOUND. Match the literal HRESULT in stderr
+                    // — this is the only signal we have from a void IDL
+                    // method whose projection can't return a structured
+                    // result.
+                    let reason = if stderr.contains("0x80070490") {
+                        FocusPaneFailureReason::NotFound
+                    } else {
+                        FocusPaneFailureReason::Other {
+                            exit_code,
+                            stderr: stderr.clone(),
+                        }
+                    };
+                    tracing::warn!(
+                        target: "wtcli",
+                        target_pane = %pane,
+                        code = exit_code,
+                        stderr = %stderr,
+                        reason = ?reason,
+                        "focus-pane exited non-zero",
+                    );
+                    if let Some(cb) = on_failure {
+                        cb(reason);
+                    }
+                }
+            }
+            Err(WtcliOneShotError::Spawn(err)) => {
+                tracing::warn!(
+                    target: "wtcli",
+                    target_pane = %pane,
+                    %err,
+                    "focus-pane spawn failed",
+                );
+                // Don't fire on_failure for spawn errors (wtcli not on PATH,
+                // permission issues, etc.) — these are infrastructure
+                // problems, not "pane gone".
+            }
+            Err(err) => {
+                tracing::warn!(
+                    target: "wtcli",
+                    target_pane = %pane,
+                    %err,
+                    "focus-pane invocation failed",
+                );
+            }
+        }
+    });
+}
+
+/// Fire-and-forget invocation of wtcli for one-shot UI actions
+/// (focus-pane, split-pane). Errors are logged but not surfaced.
+///
+/// Redirects child stdout/stderr/stdin to null so wtcli's own status output
+/// (e.g. "Created pane <id>") does not bleed into the parent TUI's screen
+/// buffer underneath ratatui.
+pub fn spawn_wtcli_async(args: &[String]) {
+    let path = resolve_wtcli_path();
+    let args = args.to_vec();
+    spawn_wtcli_task(async move {
+        tracing::debug!(target: "wtcli", path = %path, ?args, "spawning");
+        match run_wtcli_one_shot(&path, &args, false, false, WTCLI_ONE_SHOT_TIMEOUT).await {
+            Ok(_) => {}
+            Err(WtcliOneShotError::Spawn(err)) => {
+                tracing::warn!(target: "wtcli", path = %path, ?args, %err, "spawn failed");
+            }
+            Err(err) => {
+                tracing::warn!(target: "wtcli", path = %path, ?args, %err, "invocation failed");
+            }
+        }
+    });
+}
+
+/// Run `wtcli --json <args>`, parse the resulting `sessionId` (or `SessionId`)
+/// from stdout, then run `wtcli focus-pane -t <id>`. All performed on a
+/// background task so the UI stays responsive.
+///
+/// Why this exists: wtcli's split-pane subcommand passes `background=true` to
+/// the COM `SplitPane` call (see `src/tools/wtcli/main.cpp:446`), which leaves
+/// focus on the splitting pane. For interactive paths like resuming a history
+/// session from the session management list, we want the new pane focused. Rather than
+/// rebuild the C++ binary every dev cycle, we issue an explicit FocusPane
+/// after the split returns the new pane's GUID.
+///
+/// The args slice is the subcommand + its options (e.g. `["split-pane", "-c",
+/// "<commandline>"]`). `--json` is prepended automatically.
+pub fn spawn_wtcli_split_then_focus(args: &[String]) {
+    spawn_wtcli_split_then_focus_with_callback(args, None);
+}
+
+/// Variant of [`spawn_wtcli_split_then_focus`] that also delivers the new
+/// pane's GUID to a caller-supplied callback after parsing it from stdout
+/// (and before issuing the follow-up `focus-pane`). Used by `dispatch_resume`
+/// so the agent session registry can bind the resumed pane to its row even
+/// for CLIs without a hook bridge (Gemini): without this binding, the
+/// `connection_state: closed` → `PaneClosed` path can't transition the row
+/// to Ended when the user later closes the pane.
+///
+/// The callback runs on the same background task that issued the split,
+/// after a successful JSON parse. It is NOT invoked when the split fails
+/// (process spawn error, non-zero exit, malformed JSON, missing
+/// `session_id`).
+pub fn spawn_wtcli_split_then_focus_with_callback(
+    args: &[String],
+    on_pane_id: Option<Box<dyn FnOnce(String) + Send + 'static>>,
+) {
+    let path = resolve_wtcli_path();
+    let owned_args: Vec<String> = std::iter::once("--json".to_string())
+        .chain(args.iter().cloned())
+        .collect();
+
+    spawn_wtcli_task(async move {
+        let output =
+            match run_wtcli_one_shot(&path, &owned_args, true, false, WTCLI_ONE_SHOT_TIMEOUT).await
+            {
+                Ok(o) => o,
+                Err(WtcliOneShotError::Spawn(err)) => {
+                    tracing::warn!(
+                        target: "wtcli",
+                        path = %path,
+                        ?owned_args,
+                        %err,
+                        "split-pane spawn failed",
+                    );
+                    return;
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        target: "wtcli",
+                        path = %path,
+                        ?owned_args,
+                        %err,
+                        "split-pane invocation failed",
+                    );
+                    return;
+                }
+            };
+
+        if !output.status.success() {
+            tracing::warn!(
+                target: "wtcli",
+                path = %path,
+                ?owned_args,
+                code = output.status.code(),
+                "split-pane exited non-zero",
+            );
+            return;
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let parsed: serde_json::Value = match serde_json::from_str(stdout.trim()) {
+            Ok(v) => v,
+            Err(err) => {
+                tracing::warn!(
+                    target: "wtcli",
+                    %err,
+                    stdout = %stdout,
+                    "split-pane stdout was not valid JSON",
+                );
+                return;
+            }
+        };
+
+        // CreationResultToJson emits `session_id` (snake_case — see
+        // src/tools/wtcli/Formatting.cpp::CreationResultToJson). Older /
+        // alternate camel-case spellings are kept as fallbacks for
+        // forward-compat. Strip braces if the GUID arrived in `{...}`
+        // form, since FocusPane resolves either form.
+        let session_id = parsed
+            .get("session_id")
+            .or_else(|| parsed.get("SessionId"))
+            .or_else(|| parsed.get("sessionId"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim_matches(|c| c == '{' || c == '}').to_string());
+
+        let Some(session_id) = session_id else {
+            tracing::warn!(
+                target: "wtcli",
+                json = %parsed,
+                "split-pane JSON had no session_id field",
+            );
+            return;
+        };
+
+        tracing::info!(
+            target: "wtcli",
+            %session_id,
+            "split-pane returned new pane GUID, issuing focus-pane",
+        );
+
+        if let Some(cb) = on_pane_id {
+            cb(session_id.clone());
+        }
+
+        let focus_args = vec![
+            "focus-pane".to_string(),
+            "-t".to_string(),
+            session_id.clone(),
+        ];
+        match run_wtcli_one_shot(&path, &focus_args, true, true, WTCLI_ONE_SHOT_TIMEOUT).await {
+            Ok(out) => {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                if out.status.success() {
+                    tracing::info!(
+                        target: "wtcli",
+                        %session_id,
+                        "split-then-focus completed",
+                    );
+                } else {
+                    tracing::warn!(
+                        target: "wtcli",
+                        %session_id,
+                        code = out.status.code(),
+                        stderr = %stderr,
+                        "focus-pane after split exited non-zero",
+                    );
+                }
+            }
+            Err(WtcliOneShotError::Spawn(err)) => {
+                tracing::warn!(
+                    target: "wtcli",
+                    %session_id,
+                    %err,
+                    "focus-pane spawn failed after split",
+                );
+            }
+            Err(err) => {
+                tracing::warn!(
+                    target: "wtcli",
+                    %session_id,
+                    %err,
+                    "focus-pane invocation failed after split",
+                );
+            }
+        }
+    });
+}
+
+/// Channel that invokes `wtcli.exe` for protocol operations.
+pub struct CliChannel {
+    available: AtomicBool,
+    debug_tx: Option<mpsc::UnboundedSender<DebugMessage>>,
+    event_tx: std::sync::Mutex<Option<mpsc::UnboundedSender<serde_json::Value>>>,
+    listener_shutdown: std::sync::Mutex<Option<oneshot::Sender<()>>>,
+    wtcli_path: String,
+}
+
+impl Drop for CliChannel {
+    fn drop(&mut self) {
+        if let Ok(slot) = self.listener_shutdown.get_mut() {
+            if let Some(shutdown) = slot.take() {
+                let _ = shutdown.send(());
+            }
+        }
+    }
+}
+
+impl CliChannel {
+    #[cfg(test)]
+    pub(crate) fn with_test_executable(wtcli_path: String) -> Self {
+        Self {
+            available: AtomicBool::new(true),
+            debug_tx: None,
+            event_tx: std::sync::Mutex::new(None),
+            listener_shutdown: std::sync::Mutex::new(None),
+            wtcli_path,
+        }
+    }
+
+    pub async fn connect() -> anyhow::Result<Self> {
+        // WT_COM_CLSID must be set — wtcli reads it from the environment.
+        if std::env::var("WT_COM_CLSID").is_err() {
+            bail!("WT_COM_CLSID not set. Must run inside an Intelligent Terminal pane.");
+        }
+
+        Ok(Self {
+            available: AtomicBool::new(true),
+            debug_tx: None,
+            event_tx: std::sync::Mutex::new(None),
+            listener_shutdown: std::sync::Mutex::new(None),
+            wtcli_path: resolve_wtcli_path(),
+        })
+    }
+
+    pub fn with_debug_sender(mut self, tx: mpsc::UnboundedSender<DebugMessage>) -> Self {
+        self.debug_tx = Some(tx);
+        self
+    }
+
+    pub fn subscribe_events(&self) -> mpsc::UnboundedReceiver<serde_json::Value> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        *self.event_tx.lock().unwrap() = Some(tx);
+        rx
+    }
+
+    /// Start background event listener (wraps `wtcli listen --json`).
+    /// wtcli inherits WT_COM_CLSID from this process's env.
+    ///
+    /// The protocol server can be temporarily unavailable while Terminal is
+    /// still starting. `wtcli listen` exits immediately in that window (for
+    /// example with `E_NOINTERFACE`); a one-shot reader then leaves master
+    /// permanently blind to hooks and pane lifecycle events. Retry transient
+    /// failures, but stop after eight consecutive unstable attempts so a
+    /// permanently broken COM registration cannot create a process/log storm.
+    /// A subscription that stays healthy for 30 seconds resets the count.
+    pub async fn start_reader(self: &std::sync::Arc<Self>) -> bool {
+        let wtcli = self.wtcli_path.clone();
+        let weak = std::sync::Arc::downgrade(self);
+        let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
+        let (ready_tx, ready_rx) = oneshot::channel();
+        if let Some(previous) = self.listener_shutdown.lock().unwrap().replace(shutdown_tx) {
+            let _ = previous.send(());
+        }
+        tokio::spawn(async move {
+            let parent_pid = std::process::id();
+            let parent_pid_arg = parent_pid.to_string();
+            let ready_token = format!("wta-{parent_pid}");
+            let mut ready_tx = Some(ready_tx);
+            let mut retry = ListenerRetryState::new();
+            loop {
+                if weak.upgrade().is_none() {
+                    return;
+                }
+
+                let mut command = tokio::process::Command::new(&wtcli);
+                command
+                    .args([
+                        "--json",
+                        "listen",
+                        "--parent-pid",
+                        &parent_pid_arg,
+                        "--ready-token",
+                        &ready_token,
+                    ])
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .kill_on_drop(true);
+                let mut child = match command.spawn() {
+                    Ok(child) => child,
+                    Err(error) => {
+                        let retry_delay = retry.after_failure(None);
+                        tracing::warn!(
+                            target: "wtcli",
+                            path = %wtcli,
+                            %error,
+                            consecutive_failures = retry.failures,
+                            max_failures = WTCLI_LISTENER_MAX_CONSECUTIVE_FAILURES,
+                            "WT protocol event listener spawn failed"
+                        );
+                        let Some(retry_delay) = retry_delay else {
+                            tracing::error!(
+                                target: "wtcli",
+                                consecutive_failures = retry.failures,
+                                "WT protocol event listener reached its retry limit; live session status will remain stale until this WTA process restarts"
+                            );
+                            return;
+                        };
+                        tokio::select! {
+                            _ = &mut shutdown_rx => return,
+                            _ = tokio::time::sleep(retry_delay) => {}
+                        }
+                        continue;
+                    }
+                };
+                let listener_pid = child.id();
+                tracing::info!(
+                    target: "wtcli",
+                    ?listener_pid,
+                    parent_pid,
+                    "started WT protocol event listener"
+                );
+
+                let stdout = child.stdout.take().expect("listener stdout was piped");
+                let stderr = child.stderr.take();
+                let stderr_task = tokio::spawn(async move {
+                    read_pipe_bounded(stderr, WTCLI_LISTENER_STDERR_MAX).await
+                });
+                let mut reader = tokio::io::BufReader::new(stdout);
+                let mut line = String::new();
+                let mut subscribed_at: Option<tokio::time::Instant> = None;
+
+                let exit_reason = loop {
+                    line.clear();
+                    use tokio::io::AsyncBufReadExt;
+                    tokio::select! {
+                        _ = &mut shutdown_rx => break "shutdown_requested",
+                        result = reader.read_line(&mut line) => {
+                            match result {
+                                Ok(0) => break "stdout_closed",
+                                Ok(_) => {
+                                    let Some(this) = weak.upgrade() else {
+                                        break "channel_dropped";
+                                    };
+                                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(line.trim()) {
+                                        let is_ready =
+                                            is_listener_ready_marker(&val, &ready_token);
+                                        if is_ready {
+                                            if subscribed_at.is_none() {
+                                                subscribed_at = Some(tokio::time::Instant::now());
+                                                tracing::info!(
+                                                    target: "wtcli",
+                                                    ?listener_pid,
+                                                    parent_pid,
+                                                    "WT protocol event listener subscribed"
+                                                );
+                                                // Notify on every successful subscription, including
+                                                // recovery after start_reader's initial timeout.
+                                                if let Some(tx) = this.event_tx.lock().unwrap().as_ref() {
+                                                    let _ = tx.send(serde_json::json!({
+                                                        "method": "wt_listener_ready",
+                                                        "params": {}
+                                                    }));
+                                                }
+                                            }
+                                            if let Some(tx) = ready_tx.take() {
+                                                let _ = tx.send(());
+                                            }
+                                            continue;
+                                        }
+                                        let tx = this.event_tx.lock().unwrap();
+                                        if let Some(tx) = tx.as_ref() {
+                                            let _ = tx.send(val);
+                                        }
+                                    }
+                                }
+                                Err(error) => {
+                                    tracing::warn!(
+                                        target: "wtcli",
+                                        pid = listener_pid,
+                                        %error,
+                                        "wtcli event listener stdout read failed"
+                                    );
+                                    break "stdout_error";
+                                }
+                            }
+                        }
+                    }
+                };
+
+                let subscribed_uptime = subscribed_at.map(|ready| ready.elapsed());
+                drop(reader);
+                tracing::info!(
+                    target: "wtcli",
+                    pid = listener_pid,
+                    reason = exit_reason,
+                    "stopping wtcli event listener"
+                );
+                if let Err(error) = child.start_kill() {
+                    tracing::debug!(
+                        target: "wtcli",
+                        pid = listener_pid,
+                        reason = exit_reason,
+                        %error,
+                        "wtcli event listener kill request was unnecessary or failed"
+                    );
+                }
+                let status = child.wait().await;
+                let (stderr, stderr_truncated) = match stderr_task.await {
+                    Ok(Ok((bytes, truncated))) => (
+                        String::from_utf8_lossy(&bytes).trim().to_string(),
+                        truncated,
+                    ),
+                    Ok(Err(error)) => {
+                        tracing::warn!(
+                            target: "wtcli",
+                            pid = listener_pid,
+                            %error,
+                            "wtcli event listener stderr read failed"
+                        );
+                        (String::new(), false)
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            target: "wtcli",
+                            pid = listener_pid,
+                            %error,
+                            "wtcli event listener stderr task failed"
+                        );
+                        (String::new(), false)
+                    }
+                };
+                match status {
+                    Ok(status) => tracing::info!(
+                        target: "wtcli",
+                        pid = listener_pid,
+                        reason = exit_reason,
+                        %status,
+                        stderr,
+                        stderr_truncated,
+                        "wtcli event listener reaped"
+                    ),
+                    Err(error) => tracing::warn!(
+                        target: "wtcli",
+                        pid = listener_pid,
+                        reason = exit_reason,
+                        %error,
+                        stderr,
+                        stderr_truncated,
+                        "failed to reap wtcli event listener"
+                    ),
+                }
+
+                if matches!(exit_reason, "shutdown_requested" | "channel_dropped") {
+                    return;
+                }
+
+                let Some(retry_delay) = retry.after_failure(subscribed_uptime) else {
+                    tracing::error!(
+                        target: "wtcli",
+                        pid = listener_pid,
+                        reason = exit_reason,
+                        consecutive_failures = retry.failures,
+                        "WT protocol event listener reached its retry limit; live session status will remain stale until this WTA process restarts"
+                    );
+                    return;
+                };
+
+                if retry_delay.is_zero() {
+                    // The listener had a valid subscription and then died.
+                    // Re-spawn the first time immediately: COM broadcasts are
+                    // not replayed. Repeated quick post-subscribe exits retain
+                    // the consecutive-failure count and enter the same backoff
+                    // as pre-subscribe failures, preventing a tight loop.
+                    tracing::warn!(
+                        target: "wtcli",
+                        pid = listener_pid,
+                        reason = exit_reason,
+                        consecutive_failures = retry.failures,
+                        "subscribed WT protocol event listener exited; restarting immediately"
+                    );
+                    continue;
+                }
+                tracing::warn!(
+                    target: "wtcli",
+                    pid = listener_pid,
+                    reason = exit_reason,
+                    consecutive_failures = retry.failures,
+                    max_failures = WTCLI_LISTENER_MAX_CONSECUTIVE_FAILURES,
+                    retry_ms = retry_delay.as_millis(),
+                    "WT protocol event listener exited; retrying"
+                );
+                tokio::select! {
+                    _ = &mut shutdown_rx => return,
+                    _ = tokio::time::sleep(retry_delay) => {}
+                }
+            }
+        });
+
+        match tokio::time::timeout(WTCLI_LISTENER_READY_TIMEOUT, ready_rx).await {
+            Ok(Ok(())) => true,
+            Ok(Err(_)) => false,
+            Err(_) => {
+                tracing::warn!(
+                    target: "wtcli",
+                    timeout_ms = WTCLI_LISTENER_READY_TIMEOUT.as_millis(),
+                    "WT protocol event listener did not report a successful subscription"
+                );
+                false
+            }
+        }
+    }
+
+    /// Run a wtcli subcommand and return the parsed JSON output.
+    /// wtcli inherits WT_COM_CLSID from this process's env.
+    async fn run_wtcli(&self, args: &[&str]) -> anyhow::Result<serde_json::Value> {
+        let args: Vec<String> = std::iter::once("--json".to_string())
+            .chain(args.iter().map(|arg| (*arg).to_string()))
+            .collect();
+        let output =
+            run_wtcli_one_shot(&self.wtcli_path, &args, true, true, WTCLI_ONE_SHOT_TIMEOUT)
+                .await
+                .context("Failed to run wtcli")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!("wtcli failed: {}", stderr.trim());
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let trimmed = stdout.trim();
+        if trimmed.is_empty() {
+            return Ok(serde_json::Value::Null);
+        }
+        let val: serde_json::Value =
+            serde_json::from_str(trimmed).context("Failed to parse wtcli JSON output")?;
+        Ok(val)
+    }
+}
+
+#[async_trait::async_trait]
+impl WtChannel for CliChannel {
+    async fn request(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> anyhow::Result<serde_json::Value> {
+        // Map protocol method names to wtcli subcommands + args.
+        match method {
+            "list_windows" => self.run_wtcli(&["list-windows"]).await,
+            "list_tabs" => {
+                let mut args = vec!["list-tabs"];
+                let wid = params
+                    .get("window_id")
+                    .and_then(json_id_as_str)
+                    .unwrap_or_default();
+                if !wid.is_empty() {
+                    args.extend(["-w", &wid]);
+                }
+                self.run_wtcli(&args).await
+            }
+            "list_panes" => {
+                let mut args = vec!["list-panes"];
+                let wid = params
+                    .get("window_id")
+                    .and_then(json_id_as_str)
+                    .unwrap_or_default();
+                let tid = params
+                    .get("tab_id")
+                    .and_then(json_id_as_str)
+                    .unwrap_or_default();
+                if !wid.is_empty() {
+                    args.extend(["-w", &wid]);
+                }
+                if !tid.is_empty() {
+                    args.extend(["-t", &tid]);
+                }
+                self.run_wtcli(&args).await
+            }
+            "get_active_pane" => self.run_wtcli(&["active-pane"]).await,
+            "get_pane_context" => {
+                const MAX_CONTEXT_LINES: u64 = 1000;
+                const MAX_CONTEXT_CHARS: u64 = 100_000;
+
+                let pane_id = params
+                    .get("session_id")
+                    .map(|value| {
+                        value.as_str().ok_or_else(|| {
+                            anyhow!("get_pane_context: 'session_id' must be a string")
+                        })
+                    })
+                    .transpose()?;
+                let max_lines = params
+                    .get("max_lines")
+                    .and_then(serde_json::Value::as_u64)
+                    .ok_or_else(|| {
+                        anyhow!("get_pane_context: missing or invalid 'max_lines' parameter")
+                    })?;
+                let max_chars = params
+                    .get("max_chars")
+                    .and_then(serde_json::Value::as_u64)
+                    .ok_or_else(|| {
+                        anyhow!("get_pane_context: missing or invalid 'max_chars' parameter")
+                    })?;
+                if max_lines > MAX_CONTEXT_LINES {
+                    bail!("get_pane_context: 'max_lines' exceeds {MAX_CONTEXT_LINES}");
+                }
+                if max_chars > MAX_CONTEXT_CHARS {
+                    bail!("get_pane_context: 'max_chars' exceeds {MAX_CONTEXT_CHARS}");
+                }
+
+                let max_lines_owned = max_lines.to_string();
+                let max_chars_owned = max_chars.to_string();
+                let mut args = vec![
+                    "get-pane-context",
+                    "--max-lines",
+                    &max_lines_owned,
+                    "--max-chars",
+                    &max_chars_owned,
+                ];
+                if let Some(pane_id) = pane_id {
+                    if pane_id.trim().is_empty() {
+                        bail!("get_pane_context: 'session_id' must not be empty");
+                    }
+                    args.extend(["--target", pane_id]);
+                }
+                self.run_wtcli(&args).await
+            }
+            "get_settings" => self.run_wtcli(&["get-settings"]).await,
+            "read_pane_output" => {
+                let pane_id = params
+                    .get("session_id")
+                    .and_then(json_id_as_str)
+                    .unwrap_or_default();
+                let max_lines = params
+                    .get("max_lines")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(200);
+                let source = params.get("source").and_then(|v| v.as_str()).unwrap_or("");
+                let lines_owned = max_lines.to_string();
+                let mut args = vec!["capture-pane"];
+                if !pane_id.is_empty() {
+                    args.extend(["-t", &pane_id]);
+                }
+                if source == "last_prompt" {
+                    args.push("--last-prompt");
+                } else {
+                    args.extend(["-l", &lines_owned]);
+                }
+                self.run_wtcli(&args).await
+            }
+            "get_process_status" => {
+                let pane_id = params
+                    .get("session_id")
+                    .and_then(json_id_as_str)
+                    .unwrap_or_default();
+                let mut args = vec!["pane-status"];
+                if !pane_id.is_empty() {
+                    args.extend(["-t", &pane_id]);
+                }
+                self.run_wtcli(&args).await
+            }
+            "create_tab" => {
+                let mut args = vec!["new-tab"];
+                let window_id = params
+                    .get("window_id")
+                    .and_then(json_id_as_str)
+                    .unwrap_or_default();
+                let cmd = params
+                    .get("commandline")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let title = params.get("title").and_then(|v| v.as_str()).unwrap_or("");
+                let cwd = params.get("cwd").and_then(|v| v.as_str()).unwrap_or("");
+                let profile = params.get("profile").and_then(|v| v.as_str()).unwrap_or("");
+                let background = params
+                    .get("background")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let cmd_owned;
+                let title_owned;
+                let cwd_owned;
+                let profile_owned;
+                let window_id_owned;
+                if !window_id.is_empty() {
+                    window_id_owned = window_id.to_string();
+                    args.extend(["--window-id", &window_id_owned]);
+                }
+                if !cmd.is_empty() {
+                    cmd_owned = cmd.to_string();
+                    args.extend(["-c", &cmd_owned]);
+                }
+                if !title.is_empty() {
+                    title_owned = title.to_string();
+                    args.extend(["-n", &title_owned]);
+                }
+                if !cwd.is_empty() {
+                    cwd_owned = cwd.to_string();
+                    args.extend(["-d", &cwd_owned]);
+                }
+                if !profile.is_empty() {
+                    profile_owned = profile.to_string();
+                    args.extend(["-p", &profile_owned]);
+                }
+                if background {
+                    args.push("--background");
+                }
+                self.run_wtcli(&args).await
+            }
+            "split_pane" => {
+                let pane_id = params
+                    .get("session_id")
+                    .and_then(json_id_as_str)
+                    .unwrap_or_default();
+                let cmd = params
+                    .get("commandline")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let dir = params
+                    .get("direction")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let profile = params.get("profile").and_then(|v| v.as_str()).unwrap_or("");
+                let cmd_owned;
+                let dir_owned;
+                let profile_owned;
+                let mut args = vec!["split-pane"];
+                if !pane_id.is_empty() {
+                    args.extend(["-t", &pane_id]);
+                }
+                // Pass the direction string straight through to wtcli, which
+                // forwards it verbatim to the COM SplitPane call. wtcli accepts
+                // "right" | "left" | "up" | "down" | "auto"|"automatic", and the
+                // COM server also tolerates the legacy "horizontal"/"vertical".
+                if !dir.is_empty() {
+                    dir_owned = dir.to_string();
+                    args.extend(["-d", &dir_owned]);
+                }
+                if !cmd.is_empty() {
+                    cmd_owned = cmd.to_string();
+                    args.extend(["-c", &cmd_owned]);
+                }
+                if !profile.is_empty() {
+                    profile_owned = profile.to_string();
+                    args.extend(["-p", &profile_owned]);
+                }
+                self.run_wtcli(&args).await
+            }
+            "close_pane" => {
+                let pane_id = params
+                    .get("session_id")
+                    .and_then(json_id_as_str)
+                    .unwrap_or_default();
+                self.run_wtcli(&["kill-pane", "-t", &pane_id]).await
+            }
+            "focus_pane" => {
+                let pane_id = params
+                    .get("session_id")
+                    .and_then(json_id_as_str)
+                    .unwrap_or_default();
+                self.run_wtcli(&["focus-pane", "-t", &pane_id]).await
+            }
+            "send_input" => {
+                let pane_id = params
+                    .get("session_id")
+                    .and_then(json_id_as_str)
+                    .unwrap_or_default();
+                // Strict validation: caller errors must surface as errors,
+                // not silently degrade to a no-op SendInput("") that wta
+                // then reports as success. The downstream COM layer treats
+                // empty text as a deliberate no-op, so a malformed request
+                // that fell through to "" here would otherwise look
+                // identical to a successful send and be very hard to
+                // diagnose.
+                let text = params
+                    .get("text")
+                    .ok_or_else(|| anyhow!("send_input: missing 'text' parameter"))?
+                    .as_str()
+                    .ok_or_else(|| anyhow!("send_input: 'text' must be a JSON string"))?;
+                // Empty text is an explicit no-op — short-circuit before
+                // spawning wtcli; the downstream COM SendInput would treat
+                // it the same way. Mirror the response shape that
+                // `wtcli send-keys --json` produces (`ok` + `session_id`)
+                // so callers see a consistent schema regardless of whether
+                // the spawn happened. `noop: true` is an extra hint.
+                if text.is_empty() {
+                    return Ok(serde_json::json!({
+                        "ok": true,
+                        "session_id": pane_id,
+                        "noop": true,
+                    }));
+                }
+                let text_owned = text.to_string();
+                // `--raw` bypasses wtcli's tmux-style token translation so a
+                // payload that literally equals "Enter" / "Tab" / "C-c" is
+                // sent verbatim instead of being rewritten to CR / TAB /
+                // Ctrl+C. wta forwards agent-supplied text — token semantics
+                // belong on the human-facing `wtcli send-keys` path, not on
+                // this routed transport.
+                let mut args = vec!["send-keys", "--raw"];
+                if !pane_id.is_empty() {
+                    args.extend(["-t", &pane_id]);
+                }
+                // `--` stops CLI11 option parsing so a text payload starting
+                // with `-`/`--` (e.g. `--release`, `--help`) is treated as
+                // positional key data instead of being interpreted as a
+                // wtcli flag.
+                args.push("--");
+                args.push(&text_owned);
+                self.run_wtcli(&args).await
+            }
+            "get_capabilities" => self.run_wtcli(&["info"]).await,
+            other => bail!("Unsupported method: {}", other),
+        }
+    }
+
+    fn is_available(&self) -> bool {
+        self.available.load(Ordering::Relaxed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sidebar_activation_distinguishes_transport_uncertainty_from_rejection() {
+        for error in [
+            WtcliOneShotError::Wait(std::io::Error::other("wait failed")),
+            WtcliOneShotError::ReadStdout(std::io::Error::other("read failed")),
+            WtcliOneShotError::ReadStderr(std::io::Error::other("read failed")),
+            WtcliOneShotError::TimedOut {
+                timeout: Duration::from_secs(30),
+                kill_error: None,
+                reap_error: None,
+                reap_timeout: None,
+            },
+        ] {
+            assert!(request_outcome_unknown(
+                &anyhow::Error::new(error).context("wtcli")
+            ));
+        }
+        let malformed = serde_json::from_str::<serde_json::Value>("{").unwrap_err();
+        assert!(request_outcome_unknown(&anyhow::Error::new(malformed)));
+        let not_started = WtcliOneShotError::Spawn(std::io::Error::other("not installed"));
+        assert!(!request_outcome_unknown(&anyhow::Error::new(not_started)));
+        assert!(!request_outcome_unknown(&anyhow::anyhow!("pane not found")));
+    }
+
+    #[tokio::test]
+    async fn get_pane_context_rejects_invalid_session_ids_before_invocation() {
+        let channel =
+            CliChannel::with_test_executable(format!("missing-wtcli-{}.exe", uuid::Uuid::new_v4()));
+        for session_id in [
+            serde_json::json!(42),
+            serde_json::json!(-1),
+            serde_json::json!(1.5),
+            serde_json::json!(true),
+            serde_json::json!(false),
+            serde_json::Value::Null,
+            serde_json::json!({}),
+            serde_json::json!([]),
+            serde_json::json!(""),
+            serde_json::json!(" "),
+            serde_json::json!("\t"),
+            serde_json::json!("\r\n"),
+            serde_json::json!("\u{2003}"),
+        ] {
+            let error = channel
+                .request(
+                    "get_pane_context",
+                    serde_json::json!({
+                        "session_id": session_id,
+                        "max_lines": 20,
+                        "max_chars": 1000,
+                    }),
+                )
+                .await
+                .expect_err("invalid source must fail before invoking wtcli");
+            let expected = if session_id.as_str().is_some_and(|id| id.trim().is_empty()) {
+                "get_pane_context: 'session_id' must not be empty"
+            } else {
+                "get_pane_context: 'session_id' must be a string"
+            };
+            assert_eq!(error.to_string(), expected, "source: {session_id}");
+        }
+    }
+
+    #[test]
+    fn listener_readiness_marker_requires_the_matching_token() {
+        let marker = serde_json::json!({
+            "_wtcli": "listener_ready",
+            "token": "wta-42"
+        });
+        assert!(is_listener_ready_marker(&marker, "wta-42"));
+        assert!(!is_listener_ready_marker(&marker, "wta-43"));
+        assert!(!is_listener_ready_marker(
+            &serde_json::json!({"method": "agent_event", "token": "wta-42"}),
+            "wta-42"
+        ));
+    }
+
+    #[test]
+    fn listener_retry_limit_counts_only_consecutive_unstable_failures() {
+        let mut retry = ListenerRetryState::new();
+        for millis in [250, 500, 1000, 2000, 4000, 5000, 5000] {
+            assert_eq!(
+                retry.after_failure(None),
+                Some(Duration::from_millis(millis))
+            );
+        }
+        assert_eq!(retry.after_failure(Some(Duration::from_secs(1))), None);
+        assert_eq!(retry.failures, WTCLI_LISTENER_MAX_CONSECUTIVE_FAILURES);
+    }
+
+    #[test]
+    fn listener_retry_backoff_survives_quick_successful_subscriptions() {
+        let mut retry = ListenerRetryState::new();
+        for millis in [0, 250, 500, 1000, 2000, 4000, 5000] {
+            assert_eq!(
+                retry.after_failure(Some(Duration::from_secs(1))),
+                Some(Duration::from_millis(millis)),
+            );
+        }
+        assert_eq!(retry.after_failure(Some(Duration::from_secs(1))), None);
+    }
+
+    #[test]
+    fn listener_retry_resets_only_after_stable_subscribed_uptime() {
+        let mut retry = ListenerRetryState::new();
+        for _ in 0..6 {
+            assert!(retry.after_failure(None).is_some());
+        }
+        // A long connection attempt followed by a brief subscription is not
+        // healthy: only the interval after the readiness marker is supplied.
+        assert_eq!(
+            retry.after_failure(Some(WTCLI_LISTENER_STABLE_UPTIME - Duration::from_secs(1))),
+            Some(WTCLI_LISTENER_RETRY_MAX),
+        );
+        assert_eq!(retry.failures, 7);
+        assert_eq!(
+            retry.after_failure(Some(WTCLI_LISTENER_STABLE_UPTIME)),
+            Some(Duration::ZERO),
+        );
+        assert_eq!(retry.failures, 1);
+        assert_eq!(
+            retry.after_failure(None),
+            Some(WTCLI_LISTENER_RETRY_INITIAL)
+        );
+    }
+
+    #[tokio::test]
+    async fn bounded_pipe_reader_keeps_a_prefix_and_drains_the_tail() {
+        use tokio::io::AsyncWriteExt;
+
+        // Tiny OS-side capacity makes this a drain test, not just a truncation
+        // test: a reader that stopped at 128 bytes would leave the writer
+        // blocked before it could finish 32 KiB.
+        let (mut writer, reader) = tokio::io::duplex(64);
+        let payload = vec![b'x'; 32 * 1024];
+        let write_task = tokio::spawn(async move {
+            writer.write_all(&payload).await.unwrap();
+            writer.shutdown().await.unwrap();
+        });
+
+        let (retained, truncated) = read_pipe_bounded(Some(reader), 128)
+            .await
+            .expect("pipe read succeeds");
+        write_task.await.expect("writer was fully drained");
+
+        assert_eq!(retained, vec![b'x'; 128]);
+        assert!(truncated);
+    }
+
+    #[tokio::test]
+    async fn one_shot_captures_output() {
+        let args = vec![
+            "/D".to_string(),
+            "/S".to_string(),
+            "/C".to_string(),
+            "echo bounded-output".to_string(),
+        ];
+
+        let output = run_wtcli_one_shot("cmd.exe", &args, true, true, Duration::from_secs(5))
+            .await
+            .expect("command should complete");
+
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            "bounded-output"
+        );
+    }
+
+    #[tokio::test]
+    async fn one_shot_timeout_kills_and_reaps_child() {
+        let timeout = Duration::from_millis(100);
+        let args = vec![
+            "-NoLogo".to_string(),
+            "-NoProfile".to_string(),
+            "-NonInteractive".to_string(),
+            "-Command".to_string(),
+            "[Threading.Thread]::Sleep(60000)".to_string(),
+        ];
+
+        let error = run_wtcli_one_shot("powershell.exe", &args, false, false, timeout)
+            .await
+            .expect_err("command should time out");
+
+        match error {
+            WtcliOneShotError::TimedOut {
+                timeout: actual,
+                kill_error,
+                reap_error,
+                reap_timeout,
+            } => {
+                assert_eq!(actual, timeout);
+                assert!(kill_error.is_none(), "kill failed: {kill_error:?}");
+                assert!(reap_error.is_none(), "reap failed: {reap_error:?}");
+                assert!(
+                    reap_timeout.is_none(),
+                    "reap timed out after {reap_timeout:?}"
+                );
+            }
+            other => panic!("expected timeout, got {other}"),
+        }
+    }
+
+    #[test]
+    fn timeout_error_preserves_reap_timeout_diagnostics() {
+        let timeout = Duration::from_secs(30);
+        let error = WtcliOneShotError::TimedOut {
+            timeout,
+            kill_error: Some(std::io::Error::other("kill denied")),
+            reap_error: None,
+            reap_timeout: Some(WTCLI_ONE_SHOT_REAP_TIMEOUT),
+        };
+
+        let diagnostic = error.to_string();
+        assert!(diagnostic.contains("wtcli timed out after 30s"));
+        assert!(diagnostic.contains("kill failed: kill denied"));
+        assert!(diagnostic.contains("reap timed out after 2s"));
+    }
+}

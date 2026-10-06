@@ -1,0 +1,289 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
+#pragma once
+
+#include <optional>
+
+#include "AgentPaneContent.g.h"
+#include "AgentUsage.h"
+#include "TerminalPaneContent.h"
+#include "BasicPaneEvents.h"
+#include "../inc/AgentPaneRestore.h"
+
+#include "AutofixState.h"
+#include "AgentPaneLifetime.h"
+
+namespace winrt::TerminalApp::implementation
+{
+    struct AgentPaneContent : AgentPaneContentT<AgentPaneContent>, BasicPaneEvents
+    {
+    public:
+        AgentPaneContent(const winrt::TerminalApp::TerminalPaneContent& inner);
+
+        winrt::TerminalApp::TerminalPaneContent GetTerminalContent();
+        winrt::Microsoft::Terminal::Control::TermControl GetTermControl();
+
+        void UpdateAgentStatus(const winrt::hstring& name,
+                               const winrt::hstring& version,
+                               const winrt::hstring& model,
+                               const winrt::hstring& state,
+                               const winrt::hstring& backend);
+
+        void SetSessionsView(bool active);
+        // Whether the agent pane is currently displaying its sessions view
+        // (vs the chat view). Reflects the last `agent_state_changed` snapshot
+        // from wta for this pane. Read by the window-level bottom bar to
+        // decide the "sessions toggle" semantics — when sessions view is
+        // active, the next press closes the pane; otherwise it switches
+        // into sessions view.
+        bool IsSessionsView() const noexcept { return _isSessionsView; }
+        winrt::hstring AgentSessionId() const noexcept { return _agentSessionId; }
+        void SetAgentSessionId(const winrt::hstring& sessionId);
+        const winrt::hstring& YoloControlOwner() const noexcept { return _yoloControlOwner; }
+        void SetYoloControlOwner(const winrt::hstring& owner) noexcept
+        {
+            _yoloControlOwner =
+                ::Microsoft::Terminal::AgentPaneRestore::IsValidYoloControlOwner(
+                    std::wstring_view{ owner }) ?
+                    owner :
+                    winrt::hstring{};
+        }
+
+        // The agent identity this pane is currently running, as an
+        // `AgentPaneBackend` token (`claude`, `wsl:Ubuntu:claude`, ...), plus
+        // the launch command when it names a custom provider.
+        //
+        // Refreshed from the tab immediately before every save rather than
+        // cached at creation: `/agent` switches the running agent through
+        // `OnAgentSwitchRequested`, and a stale copy here would persist the
+        // agent the pane started with instead of the one it ended up on.
+        void SetAgentRestoreIdentity(const winrt::hstring& identity, const winrt::hstring& customCommand) noexcept
+        {
+            // An ACP session belongs to the agent that created it. If the tab
+            // has switched agents since this session was recorded, the id is
+            // not resumable by the agent we are about to persist — asking the
+            // new agent to load it fails with "no rollout found for thread id"
+            // and the pane comes back empty anyway, minus the error.
+            if (!_agentSessionId.empty() && _agentSessionOwner != identity)
+            {
+                _agentSessionId = {};
+                _agentSessionOwner = {};
+                _yoloControlOwner = {};
+            }
+
+            _agentRestoreIdentity = identity;
+            _agentRestoreCustomCommand = customCommand;
+        }
+
+        // The agent that owned `_agentSessionId` when it was recorded. Always
+        // written together with a non-empty session id.
+        void SetAgentSessionOwner(const winrt::hstring& agentIdentity) noexcept
+        {
+            _agentSessionOwner = agentIdentity;
+        }
+
+        // The wta executable the pane was launched with. Only cosmetic — a
+        // restore re-detects wta rather than trusting a saved path — so it is
+        // captured once and never refreshed.
+        void SetAgentRestoreExecutable(const winrt::hstring& executablePath) noexcept
+        {
+            _wtaExecutablePath = executablePath;
+        }
+
+        void CopyRestoreStateFrom(const AgentPaneContent& source) noexcept
+        {
+            // A save before helper status replay must retain the same resumable session.
+            _agentSessionId = source._agentSessionId;
+            _agentSessionOwner = source._agentSessionOwner;
+            _agentRestoreIdentity = source._agentRestoreIdentity;
+            _agentRestoreCustomCommand = source._agentRestoreCustomCommand;
+            _wtaExecutablePath = source._wtaExecutablePath;
+        }
+
+        void CopyLiveStateFrom(const AgentPaneContent& source)
+        {
+            UpdateAgentStatus(source._agentName, source._agentVersion, source._agentModel, source._agentState, source._agentBackend);
+            _helperEventReady = source._helperEventReady;
+            _yoloControlOwner = source._yoloControlOwner;
+            _agentUsage = source._agentUsage;
+            ApplyAutofixState(source._autofixState, source._lastErrorPaneId, source._detectedSummary, source._fixPreview, source._hotkeyHint, source._suggestionTitle);
+        }
+
+        // --- Per-pane autofix / diagnostics state ---
+        // Driven by inbound `autofix_state_changed` events for this pane's
+        // owning tab. The window-level bottom bar reads these accessors
+        // when refreshing for the active tab.
+        // Analysis results use Review while waiting in a closed agent pane.
+        // The helper sends Idle instead when the pane is already open.
+        using AutofixState = ::TerminalApp::Autofix::State;
+        // Update the diagnostics state from an inbound autofix_state event
+        // (single-writer for this pane's state). `pane_id` and other fields
+        // come from the JSON payload; we only stash strings that the bar
+        // surface needs to render. After updating, fires `StateChanged` so
+        // the page can refresh the window-level bottom bar if this is the
+        // active tab.
+        void ApplyAutofixState(AutofixState state,
+                               const winrt::hstring& paneId,
+                               const winrt::hstring& summary,
+                               const winrt::hstring& fixPreview,
+                               const winrt::hstring& hotkeyHint,
+                               const winrt::hstring& suggestionTitle);
+        // Update the cached pane-position. Fires StateChanged so the
+        // bottom bar can refresh its toggle-icon orientation.
+        void SetAgentPanePosition(const winrt::hstring& position);
+        void SetPendingRenameFromTabId(const winrt::hstring& value) noexcept { _pendingRenameFromTabId = value; }
+        winrt::hstring TakePendingRenameFromTabId() noexcept
+        {
+            const auto value = _pendingRenameFromTabId;
+            _pendingRenameFromTabId = {};
+            return value;
+        }
+        void SetTransferSourceTabId(const winrt::hstring& value) noexcept { _transferSourceTabId = value; }
+        winrt::hstring TransferSourceTabId() const noexcept { return _transferSourceTabId; }
+        void ClearTransferSourceTabId() noexcept { _transferSourceTabId = {}; }
+        void SetPendingAgentSourceProfileGuid(const std::optional<winrt::guid>& value) noexcept { _pendingAgentSourceProfileGuid = value; }
+        std::optional<winrt::guid> TakePendingAgentSourceProfileGuid() noexcept
+        {
+            const auto value = _pendingAgentSourceProfileGuid;
+            _pendingAgentSourceProfileGuid.reset();
+            return value;
+        }
+        void AdoptLifetime(AgentPaneLifetime lifetime) noexcept { _lifetime = std::move(lifetime); }
+        AgentPaneLifetime TakeLifetime() noexcept { return std::move(_lifetime); }
+        bool HasLifetime() const noexcept { return static_cast<bool>(_lifetime); }
+        uint64_t TransferId() const noexcept { return _transferId; }
+        void RestoreHiddenAfterTransfer(bool hidden) noexcept { _restoreHiddenAfterTransfer = hidden; }
+        bool TakeHiddenAfterTransfer() noexcept { return std::exchange(_restoreHiddenAfterTransfer, false); }
+        void AwaitingTransferredTabContent(bool awaiting) noexcept { _awaitingTransferredTabContent = awaiting; }
+        bool AwaitingTransferredTabContent() const noexcept { return _awaitingTransferredTabContent; }
+
+        // Apply the provided background and foreground brushes to the
+        // agent-pane top bar (#348). Internal-only (not on IDL).
+        void ApplyThemeColors(const winrt::Windows::UI::Xaml::Media::Brush& background,
+                              const winrt::Windows::UI::Xaml::Media::Brush& foreground);
+
+        // Accessors for state that the window-level bottom bar projects.
+        AutofixState GetAutofixState() const noexcept { return _autofixState; }
+        // True once the helper's ACP session has reached Connected (driven
+        // by the `agent_status` `state` field via UpdateAgentStatus). This is
+        // one gate for the bottom-bar diagnostics group: no autofix
+        // capability exists before connect (cold start) or after a
+        // failure/disconnect. An actionable autofix state is also required.
+        bool IsAgentConnected() const noexcept { return _agentState == L"connected"; }
+        // True after the first agent_status routed to this pane. The helper
+        // subscribes to WT events before it can publish that status, so this
+        // also proves that settings events can reach the helper.
+        bool IsHelperEventReady() const noexcept { return _helperEventReady; }
+        winrt::hstring GetAgentName() const noexcept { return _agentName; }
+        winrt::hstring GetAgentModel() const noexcept { return _agentModel; }
+        winrt::hstring GetLastErrorPaneId() const noexcept { return _lastErrorPaneId; }
+        winrt::hstring GetFixPreview() const noexcept { return _fixPreview; }
+        winrt::hstring GetHotkeyHint() const noexcept { return _hotkeyHint; }
+        winrt::hstring GetSuggestionTitle() const noexcept { return _suggestionTitle; }
+        winrt::hstring GetDetectedSummary() const noexcept { return _detectedSummary; }
+        winrt::hstring GetAgentPanePosition() const noexcept { return _agentPanePosition; }
+        [[nodiscard]] bool ApplyAgentUsage(const Json::Value& usage);
+        const std::vector<::TerminalApp::AgentUsage::Item>& GetAgentUsage() const noexcept { return _agentUsage; }
+
+        // Fired whenever cached bottom-bar-relevant state changes (autofix
+        // state, sessions view, agent pane position). The outer page
+        // subscribes to refresh the window-level bottom bar when the
+        // firing pane belongs to the active tab.
+        til::typed_event<winrt::TerminalApp::AgentPaneContent, IInspectable> StateChanged;
+
+#pragma region IPaneContent
+        winrt::Windows::UI::Xaml::FrameworkElement GetRoot();
+
+        void UpdateSettings(const winrt::Microsoft::Terminal::Settings::Model::CascadiaSettings& settings);
+
+        winrt::Windows::Foundation::Size MinimumSize();
+        void Focus(winrt::Windows::UI::Xaml::FocusState reason = winrt::Windows::UI::Xaml::FocusState::Programmatic);
+        void Close();
+        winrt::Microsoft::Terminal::Settings::Model::INewContentArgs GetNewTerminalArgs(BuildStartupKind kind) const;
+
+        winrt::hstring Title();
+        uint64_t TaskbarState();
+        uint64_t TaskbarProgress();
+        bool ReadOnly();
+        winrt::hstring Icon() const;
+        Windows::Foundation::IReference<winrt::Windows::UI::Color> TabColor() const noexcept;
+        winrt::Windows::UI::Xaml::Media::Brush BackgroundBrush();
+#pragma endregion
+
+#pragma region ISnappable
+        float SnapDownToGrid(const TerminalApp::PaneSnapDirection direction, const float sizeToSnap);
+        Windows::Foundation::Size GridUnitSize();
+#pragma endregion
+
+    private:
+        winrt::TerminalApp::TerminalPaneContent _inner{ nullptr };
+
+        // Latest agent status (raw, in case we need to recompute the displayed label).
+        winrt::hstring _agentName{};
+        winrt::hstring _agentVersion{};
+        winrt::hstring _agentModel{};
+        winrt::hstring _agentState{};
+        winrt::hstring _agentBackend{};
+        bool _helperEventReady{ false };
+
+        // When true, the bar replaces the agent/model label with "Agent sessions"
+        // and hides the agent logo. Driven by TerminalPage::OnAgentStateChanged
+        // (the single writer for view-derived UI state).
+        bool _isSessionsView{ false };
+        bool _canEnableSessions{ false };
+        winrt::hstring _agentSessionId{};
+        winrt::hstring _agentSessionOwner{};
+        winrt::hstring _yoloControlOwner{};
+        winrt::hstring _agentRestoreIdentity{};
+        winrt::hstring _agentRestoreCustomCommand{};
+        winrt::hstring _wtaExecutablePath{};
+
+        // --- Diagnostics / autofix state (projected by the window bottom bar) ---
+        AutofixState _autofixState{ AutofixState::Idle };
+        winrt::hstring _lastErrorPaneId{};
+        winrt::hstring _fixPreview{};
+        winrt::hstring _hotkeyHint{};
+        winrt::hstring _suggestionTitle{};
+        winrt::hstring _detectedSummary{};
+        std::vector<::TerminalApp::AgentUsage::Item> _agentUsage;
+        // Effective per-tab AgentPanePosition for icon orientation.
+        // TerminalPage updates it from the Tab runtime override or global
+        // fallback; generic settings propagation must not overwrite it.
+        winrt::hstring _agentPanePosition{ L"bottom" };
+        winrt::hstring _pendingRenameFromTabId{};
+        // The old StableId remains a temporary alias until this replacement
+        // wrapper recovers the helper's first post-transfer status.
+        winrt::hstring _transferSourceTabId{};
+        std::optional<winrt::guid> _pendingAgentSourceProfileGuid;
+        AgentPaneLifetime _lifetime;
+        inline static std::atomic<uint64_t> _nextTransferId{ 0 };
+        const uint64_t _transferId{ ++_nextTransferId };
+        bool _closed{ false };
+        bool _restoreHiddenAfterTransfer{ false };
+        bool _awaitingTransferredTabContent{ false };
+
+        // Inner content event tokens — forwarded to our own BasicPaneEvents.
+        winrt::event_token _innerCloseRequested{};
+        winrt::event_token _innerConnectionStateChanged{};
+        winrt::event_token _innerBellRequested{};
+        winrt::event_token _innerTitleChanged{};
+        winrt::event_token _innerTabColorChanged{};
+        winrt::event_token _innerTaskbarProgressChanged{};
+        winrt::event_token _innerReadOnlyChanged{};
+        winrt::event_token _innerFocusRequested{};
+
+        void _wireInnerEvents();
+        void _unwireInnerEvents();
+
+        void _refreshLabel();
+        void _refreshLogo();
+        void _refreshSessionsHint();
+        float _chromeHeight();
+    };
+}
+
+namespace winrt::TerminalApp::factory_implementation
+{
+    BASIC_FACTORY(AgentPaneContent);
+}

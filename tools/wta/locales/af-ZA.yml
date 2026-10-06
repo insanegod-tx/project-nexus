@@ -1,0 +1,270 @@
+# Opstellingskerm titels
+# {Locked=qps-ploc,qps-ploca,qps-plocm}
+setup.title.agent_missing: "Agent nie gevind nie"
+setup.title.agent_error: "Agentverbinding het misluk"
+setup.title.not_available: "Agent is nie beskikbaar nie"
+setup.title.sign_in: "Aanmelding vereis"
+
+# %{agent} word tydens uitvoering vervang met die agent se vertoonnaam.
+setup.subtitle.copilot_missing: "Jou agent \"%{agent}\" is nie geïnstalleer nie. Volg die stappe hieronder om dit te installeer. Om van agent te wissel, gaan na Intelligente Terminaal Settings > Agent."
+setup.subtitle.agent_missing: "Jou agent \"%{agent}\" is nie geïnstalleer nie. Herinstalleer dit handmatig en probeer weer. Om van agent te wissel, gaan na Intelligente Terminaal Settings > Agent."
+setup.subtitle.copilot_auth: "Jou agent \"%{agent}\" vereis stawing. Volg die stappe hieronder om aan te meld. Om van agent te wissel, gaan na Intelligente Terminaal Settings > Agent."
+setup.subtitle.agent_auth: "Jou agent \"%{agent}\" vereis stawing. Meld aan via die agent en kies dan \"Ek het aangemeld\" hieronder. Om van agent te wissel, gaan na Intelligente Terminaal Settings > Agent."
+setup.subtitle.connection_failed: "Kon %{agent} nie begin nie."
+
+# {Locked=qps-ploc,qps-ploca,qps-plocm}, {Locked="Settings"}
+
+setup.option.install: "Installeer %{agent}"
+setup.option.install_hint: "(Sal outomaties geïnstalleer word)"
+setup.option.signin: "Meld aan by %{agent}"
+setup.option.retry_detection: "Probeer weer"
+setup.option.retry_auth: "Ek het aangemeld — probeer weer koppel"
+setup.option.retry_connection: "Probeer weer koppel"
+setup.status.installing: "Installeer tans..."
+setup.status.installing_copilot_cli: "GitHub Copilot CLI word geïnstalleer"
+setup.status.connecting_agent: "Koppel tans aan %{agent}"
+setup.status.install_failed: "Installasie het misluk: "
+setup.status.installing_winget: " Installeer tans via winget..."
+setup.error.install_start_failed: "Die installeerder kon nie begin word nie. Kies \"Probeer weer\" om weer te probeer."
+setup.error.install_timed_out: "Die installasie het die tydlimiet oorskry. Kies \"Probeer weer\" voordat jy 'n ander installasie begin."
+setup.error.install_detection_timed_out: "Die installasie is voltooi, maar Copilot is nog nie sigbaar nie. Kies \"Probeer weer\" om weer na te gaan."
+
+# ── Stawingsvloei (src/ui/auth.rs) ──────────────────────────────────────────────
+# {Locked="CLI"} - akroniem, algemene gebruik in Microsoft-lokaliserings
+auth.agent_selected: "Agent %{name} is gekies"
+auth.agent_selected_with_status: "Agent %{name} — "
+auth.checking_authentication: "  %{spinner} Stawing word nagegaan..."
+auth.waiting_for_authorization: "  %{spinner} Wag vir magtiging..."
+auth.code_copied_hint: "  Kode na die knipbord gekopieer — plak dit in jou blaaier."
+auth.device_code_prompt: "Besoek %{url} en voer die kode in: %{code}"  # Copilot device-flow sign-in progress; %{url} is the verification URL, %{code} is the device code
+auth.card_connect: "  Koppel %{name} om agentkenmerke te aktiveer"
+auth.enterprise_prompt: "  Enter om aan te meld · E vir GitHub Enterprise · Esc om terug te gaan"  # {Locked="Enter","E","Esc"}
+auth.enterprise_domain_label: "  Enterprise-domein: "
+auth.enterprise_hint_footer: "  Enter om aan te meld · Esc vir github.com"  # {Locked="Enter","Esc","github.com"}
+auth.login_failed_help_enterprise: "  Druk Enter om weer te probeer, of Esc vir github.com. Algemene oorsake: 'n verkeerd getikte of onbereikbare domein, 'n vervalde kode, of geen Copilot-toegang op daardie gasheer nie."  # {Locked="Enter","Esc","github.com","Copilot"}
+auth.login_failed_help_default: "  Druk Enter om weer te probeer, of Esc om terug te gaan."  # {Locked="Enter","Esc"}
+
+# ── Kletsaansig (src/ui/chat.rs) ──────────────────────────────────────────────
+chat.activity_thinking: "Dink na…"
+# {Locked=qps-ploc,qps-ploca,qps-plocm}
+chat.welcome_title: "Welkom by Intelligente Terminaal!"
+chat.welcome_disclaimer: "Intelligente Terminaal gebruik AI."
+chat.plan_header: "Plan:"
+chat.plan_marker_completed: "[x]"  # {Locked}
+chat.plan_marker_in_progress: "[>]"  # {Locked}
+chat.plan_marker_pending: "[ ]"  # {Locked}
+chat.autofix_prompt_label: "Onlangse opdragmislukking outomaties gediagnoseer"
+chat.turn_canceled: "(gekanselleer)"
+chat.turn_executed: "→ uitgevoer: %{title}"
+# Persistent tool-category labels shown after a status marker and before a subject.
+chat.tool_kind.run: "Uitvoer"
+chat.tool_kind.insert: "Voeg in"
+chat.tool_kind.read: "Lees"
+chat.tool_kind.search: "Soek"
+chat.tool_kind.edit: "Wysig"
+chat.tool_kind.delete: "Skrap"
+chat.tool_kind.move: "Skuif"
+chat.tool_kind.fetch: "Haal"
+chat.tool_kind.think: "Dink"
+chat.tool_kind.mode: "Modus"
+chat.tool_kind.other: "Hulpmiddel"
+
+# ── Invoerplekhouers (src/ui/input.rs) ────────────────────────────────────
+input.placeholder.connected: "Vra enigiets, / vir opdragte.."  # {Locked="/"}
+input.placeholder.connecting: "koppel tans..."
+input.placeholder.disconnected: "ontkoppel"
+# Summary of attached images; keep 📎 and %{items} verbatim.
+input.image_attachments: "📎 Beelde: %{items}"  # {Locked="📎","%{items}"}
+
+# ── Opdrag-opspring (src/ui/command_popup.rs) ─────────────────────────────────
+# {Locked="/"} - skuinsstreep-opdrag voorvoegsel, moet ASCII bly
+commands.popup_title: " / opdragte "
+commands.help_title: " Hulp "
+commands.help_header: "Skuinsstreep-opdragte — tik / in die invoerveld."
+commands.help_escape_hint: "  //text     Stuur 'n letterlike '/' (ontsnap die opdragontleder)"  # {Locked="//text","/"}
+commands.help_close_hint: "  Esc        Maak hierdie hulp toe"  # {Locked="Esc"}
+
+# ── Aanbevelingspaneel (src/ui/recommendations.rs) ───────────────────────────────
+# {Locked="Enter","Esc","↵","↑","↓","←","→"} - sleutelname en Enter-sleutel-glief, moenie vertaal nie
+recommendations.nav_hint: "(↑ ↓ om te navigeer • ← → om knoppies te wissel • Enter om te kies • Esc om te kanselleer)"
+recommendations.button_run_command: "[ Voer opdrag uit ]"
+recommendations.button_insert_in_terminal: "Voeg in Terminaal in"
+recommendations.button_open_in_new_tab: "Maak oop in Nuwe Oortjie ↵"
+recommendations.button_open_in_new_panel: "Maak oop in Nuwe Paneel ↵"
+recommendations.button_open_tab: "Maak Oortjie oop ↵"
+recommendations.button_open_panel: "Maak Paneel oop ↵"
+recommendations.button_execute: "Voer uit ↵"
+recommendations.agent_fallback: "agent"
+recommendations.open_and_send_display: "%{agent}: %{input}"
+recommendations.open_kind_tab: "oortjie"
+recommendations.open_kind_panel: "paneel"
+recommendations.open_kind_panel_direction: "paneel (%{direction})"
+recommendations.open_new_with_title_and_cwd: "Nuwe %{kind} (%{title}) in %{cwd}"
+recommendations.open_new_with_title: "Nuwe %{kind} (%{title})"
+recommendations.open_new_with_cwd: "Nuwe %{kind} in %{cwd}"
+recommendations.open_new_empty: "Nuwe leë %{kind}"
+
+# ── Toestemmingsdialoog kompakte modus (src/ui/permission.rs) ───────────────────────────
+permission.compact.default_description: "Toestemming versoek"
+permission.compact.prefix: "[!] "  # {Locked}
+permission.compact.hint: "[Y/N om te antwoord · verander grootte vir volle kaart]"  # {Locked="Y/N"}
+
+# ── Agentstatus (src/agent_check.rs) ───────────────────────────────────────
+agent.status.not_found: "Nie gevind nie"
+# {Locked="winget","GitHub.Copilot","GitHub","Copilot"} - gereedskapname en opdrag, moet soos dit is uitgevoer word
+agent.install.running_winget: "Voer uit: winget install GitHub.Copilot"
+agent.install.launch_failed: "Kon nie winget begin nie: %{error}"
+agent.install.winget_exited: "winget het onverwags afgesluit: %{error}"
+agent.install.winget_failed_code: "winget-installasie het misluk (uittreekode %{code})"
+agent.install.unsupported: "Outomatiese installasie word nie ondersteun vir %{agent} nie"
+agent.custom.auth_hint: "Maak seker %{name} is geïnstalleer en op jou PATH."  # {Locked="PATH"}
+
+# ── Agenteaansig (src/ui/agents_view.rs) ─────────────────────────────────
+agents.loading: "Laai tans..."
+# {Locked="Enter","Esc","F5","↑","↓","/"} - sleutelkombinasies, moenie vertaal nie
+agents.footer_hint: "(↑ ↓ om te navigeer • Enter om sessie te begin • Esc om te verlaat • F5 om te verfris • / om te soek)"
+agents.status.active: "Aktief"
+agents.status.waiting_for_input: "Wag vir invoer"
+agents.status.error: "Fout"
+agents.status.idle: "Ledig"
+
+# ── Uitleg-welkomwenk (src/ui/layout.rs) ──────────────────────────────
+layout.welcome_hint: "  (Ctrl+Shift+. om agentpaneel te wys/verberg • Ctrl+Shift+/ om agentsessie te wys/verberg)"  # {Locked="Ctrl+Shift+.","Ctrl+Shift+/"}
+
+# ── Verbindingstoestand ────────────────────────────────────────────────────────
+# Preparing the AI agent connection, including preflight and reuse of a cached agent.
+connection.starting: "Berei agentverbinding voor..."
+connection.reconnecting: "Herkoppel tans..."
+# Retiring old AI agent sessions for /restart, before the next connection phases.
+connection.restarting: "Herbegin agent..."
+# Connecting the pane to WTA's local coordinator process, not to an AI model.
+connection.coordinator: "Koppel tans aan plaaslike koördineerder..."
+# Initializing the helper/coordinator connection, including local preparation and AI agent initialization.
+connection.initializing: "Inisialiseer agentverbinding..."
+# Refreshing the user's authentication with the AI agent after login; not verifying the agent's identity.
+connection.authenticating: "Staaf tans die gebruiker by die agent..."
+# Reading the coordinator's registry snapshot, including existing history; not fetching history from the AI agent.
+connection.syncing_sessions: "Lees sessielys..."
+# Creating the AI agent session, including local registration; internal agent progress is unknown.
+connection.creating_session: "Skep agentsessie..."
+# Applying the requested AI model before the connection is ready. Preserve %{model}.
+connection.selecting_model: "Stel sessiemodel: %{model}..."  # {Locked="%{model}"}
+# Activity row while connecting to restore a conversation. Keep the actual stage first so narrow panes show it; session_id is shortened to eight characters.
+connection.resuming_stage: "%{stage} (hervat %{session_id})"  # {Locked="%{stage}","%{session_id}"}
+connection.connecting_activity: "Koppel tans aan agent…"
+connection.lost: "Verbinding met die agent is verloor. Tik /restart om weer te koppel."  # {Locked="/restart"}
+
+# ── Stelselboodskappe (src/app.rs) ────────────────────────────────────────
+system.close_pane_hint: "Druk Ctrl+C weer om die paneel te sluit"  # {Locked="Ctrl+C"}
+system.selection_copied: "Gekopieer"  # Brief hint shown after selected terminal text is copied
+system.cancelled: "Gekanselleer."
+system.no_prompt_in_flight: "Geen opdrag onderweg nie."
+system.authentication_failed: "Stawing het misluk"
+system.stopped_max_tokens: "Die antwoord is afgekap nadat die model se afvoerlimiet bereik is."
+system.stopped_max_turn_requests: "Die agent het gestop nadat sy versoeklimiet vir hierdie beurt bereik is."
+system.stopped_refusal: "Die agent het geweier om met hierdie versoek voort te gaan."
+system.agent_busy: "Agent is besig op hierdie oortjie — wag totdat die huidige opdrag klaar is."
+# Image paste messages; "agent" refers to an AI agent. Keep Enter and %{label} verbatim.
+system.image_clipboard_empty: "Geen beeld op die knipbord om te plak nie."
+system.image_not_supported: "Hierdie agent ondersteun nie beeldinvoer nie."
+system.image_pasted: "Beeld aangeheg (%{label}). Druk Enter om te stuur."  # {Locked="%{label}","Enter"}
+system.resuming_session: "Hervat sessie %{session_id}..."
+system.unknown_command: "Onbekende opdrag \"%{command}\" — as opdrag gestuur. Tik /help vir die lys."
+system.busy_use_stop: "Wag totdat die huidige opdrag klaar is, of gebruik eers /stop."
+system.cannot_focus_session: "Kan nie op sessie %{session_id} fokus nie: dit lyk aktief, maar geen paneel-GUID is nog gebind nie. Probeer oor ’n oomblik weer."
+system.cannot_resume_no_load_session: "Kan nie in agentpaneel hervat nie: %{agent} het nie die ACP `loadSession`-vermoë aangekondig nie."
+system.cannot_resume_no_resume_flag: "Kan nie %{agent}-sessie hervat nie: hierdie agent het geen `--resume`-styl vlag nie."
+system.cannot_resume_unknown_agent: "Kan nie sessie %{session_id} hervat nie: die bronagent is onbekend aan hierdie bouweergawe."
+system.cannot_resume_phantom_via_flag: "Kan nie %{agent}-sessie %{session_id} hervat nie: dit is begin maar het nooit enige gesprek opgebou nie, dus sou %{agent} self die hervat verwerp. Verwyder die ry."
+system.cannot_resume_phantom_via_load: "Kan nie %{agent}-sessie %{session_id} hervat nie: dit is begin maar het nooit enige gesprek opgebou nie, dus sou %{agent} die laai verwerp. Verwyder die ry."
+system.fallback.this_agent: "hierdie agent"
+system.fallback.connected_agent: "die gekoppelde agent"
+
+# ── CLI-uitvoer tydens uitvoering (src/main.rs) ────────────────────────────────────
+output.no_windows: "Geen vensters gevind nie."
+output.no_tabs: "Geen oortjies gevind nie."
+output.no_panes: "Geen panele gevind nie."
+output.no_windows_in_list: "Geen vensters gevind nie"
+output.no_tabs_in_window: "Geen oortjies gevind in venster %{window_id} nie"
+# {Locked="WINDOW_ID","TAB_ID","PANE_ID","PID","ACTIVE","ROWS","COLS","FOCUSED","TITLE"} - kolomidentifiseerders, hou ASCII vir ontleding
+output.header.windows: "WINDOW_ID    TITLE                          FOCUSED"
+output.header.tabs: "TAB_ID     TITLE                          FOCUSED"
+output.header.panes: "PANE_ID    PID      ACTIVE   ROWS       COLS"
+output.active_pane: "Aktiewe paneel: %{pane} (oortjie: %{tab}, venster: %{window})"
+output.pane_running: "Loop tans (PID: %{pid})"  # {Locked="PID"}
+output.pane_exited: "Afgesluit (kode: %{code}, PID: %{pid})"  # {Locked="PID"}
+output.created_tab: "Oortjie %{tab_id} geskep (paneel %{pane_id})"
+output.created_pane: "Paneel %{pane_id} geskep"
+output.pane_closed: "Paneel %{pane_id} gesluit."
+
+# ── Foute (src/main.rs + src/agent_check.rs) ───────────────────────────────
+error.no_active_pane: "Geen aktiewe paneel gevind nie. Gebruik -t om 'n paneel-ID te spesifiseer."  # {Locked="-t"}
+error.wt_com_clsid_not_set: "WT_COM_CLSID is nie gestel nie. Voer uit binne 'n Windows Terminal-paneel."  # {Locked="WT_COM_CLSID","Windows Terminal"}
+error.unknown_shell_type: "Onbekende doptipe '%{shell}'. Gebruik: bash, powershell, cmd, fish"  # {Locked="bash","powershell","cmd","fish"}
+# {Locked="wtcli wait-for"} - opdragnaam, moenie vertaal nie
+error.wtcli_wait_for_spawn: "Kon nie wtcli wait-for begin nie"
+error.wtcli_wait_for_parse: "Kon nie wtcli wait-for-uitvoer ontleed nie"
+error.wtcli_wait_for_failed: "wtcli wait-for het misluk: %{stderr}"
+
+# ── Haakstatusse-uitvoer (src/main.rs) ───────────────────────────────────
+# {Locked="CLI","PATH","wt-agent-hooks","wta","wta hooks status","%LOCALAPPDATA%","IntelligentTerminal","wta-install-hooks.log"} - gereedskap/CLI-name, omgewingsveranderlikes, loglêername
+hooks.bundle_source: "bondelbron: %{source}%{path_suffix}"
+hooks.cli_not_on_path: "✗ CLI nie op PATH nie"
+hooks.installed: "✓ geïnstalleer"
+hooks.marketplace_path_stale: "⚠ markpad verouderd"
+hooks.installed_but_disabled: "⚠ geïnstalleer maar gedeaktiveer"
+hooks.not_installed: "✗ nie geïnstalleer nie"
+hooks.uninstall_skipped: "oorgeslaan (CLI nie op PATH nie)"
+hooks.install_succeeded: "✓ wt-agent-hooks geïnstalleer vir %{clis}"
+# ── Relative time + date formatting (src/ui/agents_view.rs) ─────────────────
+time.just_now: "nou net"
+time.minute_singular: "%{count} minuut gelede"
+time.minutes_other: "%{count} minute gelede"
+time.hour_singular: "%{count} uur gelede"
+time.hours_other: "%{count} uur gelede"
+time.day_singular: "%{count} dag gelede"
+time.days_other: "%{count} dae gelede"
+
+# ── Slash-command summaries (src/commands.rs) ─────────────────────────────
+# Command names (/help, /clear, etc.) stay English; descriptions translate.
+# {Locked="ACP","Ctrl+Shift+/"} - protocol name and shortcut, do not translate
+commands.help.summary: "Show this command list"
+commands.clear.summary: "Clear the chat scrollback (keeps session)"
+commands.new.summary: "Start a fresh ACP session (drops history)"  # {Locked="ACP"}
+commands.fix.summary: "Diagnose the active terminal and suggest a fix (/fix <hint>)"  # {Locked="/fix","<hint>"}
+commands.restart.summary: "Restart agent"
+commands.stop.summary: "Cancel the in-flight prompt"
+commands.sessions.summary: "Open the historical sessions picker (Ctrl+Shift+/)"  # {Locked="Ctrl+Shift+/"}
+commands.agent.summary: "Kies die agent vir hierdie oortjie (/agent <id> om direk oor te skakel)"  # {Locked="/agent","<id>"}
+
+# ── Aanbevelingsuitvoering (src/coordinator.rs) ───────────────────────────
+system.choice_execution_failed: "Keuse %{choice} het misluk: %{error}"
+
+# ── Agent picker (src/ui/agent_popup.rs) ────────────────────────────────────
+# {Locked="↑","↓","Enter","Esc"} - key names, do not translate
+agent_picker.title: "Kies agent (↑ ↓ • Enter • Esc)"  # Agent means an AI coding agent
+# Shown when no policy-allowed AI agent CLI is installed on the machine.
+system.no_agents: "Geen beskikbare agent-CLI is op hierdie masjien gevind nie."  # {Locked="CLI"}
+# {agent} is the unrecognized text the user typed after /agent.
+system.agent_unknown: "Onbekende of onbeskikbare agent %{agent} — tik /agent om die beskikbare lys te sien."  # {Locked="/agent"}
+# Shown only when /agent is used outside a Windows Terminal-owned agent pane.
+system.agent_switch_unavailable: "Agent-oorskakeling is nie beskikbaar buite 'n Windows Terminal-oortjie nie."
+
+# ── Model picker (/model) ───────────────────────────────────────────────────
+commands.model.summary: "Kies die model vir hierdie paneel (/model <id> om direk oor te skakel)"  # {Locked="/model","<id>"}
+commands.config.summary: "Stel hierdie agent-sessie op"  # Agent means an AI coding agent; shown for the /config command. {Locked="/config"}
+commands.move.summary: "Skuif hierdie oortjie se agentpaneel (/move <position>)"  # {Locked="/move","<position>"}
+model_picker.title: "Kies model (↑ ↓ • Enter • Esc)"  # {Locked="↑","↓","Enter","Esc"}
+system.no_models: "Die gekoppelde agent het geen kiesbare modelle aangekondig nie."
+system.model_set: "Model vir hierdie paneel gestel op %{model}."  # {Locked="%{model}"}
+
+# ── Session configuration picker (src/ui/config_popup.rs) ───────────────────
+# {Locked="↑","↓","Enter","Esc","ACP"} - key names and protocol name
+config_picker.title: "Sessie-konfigurasie (↑ ↓ • Enter • Esc)"
+# Shown when /config is used but the AI agent exposed no ACP select options.
+system.no_config_options: "Die gekoppelde agent het geen konfigureerbare sessie-opsies geadverteer nie."
+# {option} is an Agent-provided option name; {error} is the ACP error.
+system.config_update_failed: "Kon nie %{option} bywerk nie: %{error}"
+system.yolo_disable_pending: "die verskaffer het nie die vereiste nie-bevoorregte sessietoestand bevestig nie"  # Shown after the localized failure prefix while prompts remain blocked until the AI agent provider confirms that its privileged session mode is off. Provider means an AI agent provider, not a network provider.
+system.provider_command_blocked_by_policy: "%{command}: Outomatiese goedkeuring is deur jou organisasie se beleid gedeaktiveer."  # {Locked="%{command}"} Shown when AllowAutomaticApproval blocks a provider-advertised privileged command.
+system.model_unknown: "Onbekende model %{model} — tik /model om die beskikbare lys te sien."  # {Locked="%{model}","/model"}

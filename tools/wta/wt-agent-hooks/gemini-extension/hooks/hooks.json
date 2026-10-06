@@ -1,0 +1,58 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": ".*",
+        "hooks": [{
+          "type": "command",
+          "command": "try { wtcli.exe agent-hook --cli-source gemini --event agent.session.start } catch { }; exit 0"
+        }]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "matcher": ".*",
+        "hooks": [{
+          "type": "command",
+          "command": "try { wtcli.exe agent-hook --cli-source gemini --event agent.session.end } catch { }; exit 0"
+        }]
+      }
+    ],
+     "BeforeAgent": [
+      {
+        "matcher": ".*",
+        "hooks": [{
+          "type": "command",
+          "command": "try { wtcli.exe agent-hook --cli-source gemini --event agent.prompt.submit } catch { }; exit 0"
+        }]
+      }
+    ],
+    "BeforeTool": [
+      {
+        "matcher": ".*",
+        "hooks": [{
+          "type": "command",
+          "command": "try { wtcli.exe agent-hook --cli-source gemini --event agent.tool.starting } catch { }; exit 0"
+        }]
+      }
+    ],
+    "Notification": [
+      {
+        "matcher": ".*",
+        "hooks": [{
+          "type": "command",
+          "command": "try { wtcli.exe agent-hook --cli-source gemini --event agent.notification } catch { }; exit 0"
+        }]
+      }
+    ],
+    "AfterAgent": [
+      {
+        "matcher": ".*",
+        "hooks": [{
+          "type": "command",
+          "command": "try { wtcli.exe agent-hook --cli-source gemini --event agent.stop } catch { }; exit 0"
+        }]
+      }
+    ]
+  }
+}

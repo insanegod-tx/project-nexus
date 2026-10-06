@@ -1,0 +1,448 @@
+use std::fs;
+use std::path::{Path, PathBuf};
+
+pub(crate) const RUNTIME_CONTEXT_MARKER: &str = "<!-- WTA_RUNTIME_CONTEXT -->";
+
+const USER_PROMPT_FILE_NAME: &str = "terminal-agent.md";
+const DEFAULT_PROMPT_FILE_NAME: &str = "terminal-agent.default.md";
+const EMBEDDED_DEFAULT_PROMPT: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/prompts/terminal-agent.md"
+));
+
+const AUTOFIX_USER_PROMPT_FILE_NAME: &str = "auto-fix.md";
+const AUTOFIX_DEFAULT_PROMPT_FILE_NAME: &str = "auto-fix.default.md";
+const EMBEDDED_AUTOFIX_PROMPT: &str =
+    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/prompts/auto-fix.md"));
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PlannerPromptTemplate {
+    pub content: String,
+    pub source_label: String,
+    pub display_name: String,
+}
+
+pub(crate) fn load_autofix_prompt_template() -> PlannerPromptTemplate {
+    load_autofix_prompt_template_from_root(
+        runtime_prompt_root().as_deref(),
+        EMBEDDED_AUTOFIX_PROMPT,
+    )
+}
+
+pub(crate) fn load_planner_prompt_template() -> PlannerPromptTemplate {
+    load_planner_prompt_template_from_root(
+        runtime_prompt_root().as_deref(),
+        EMBEDDED_DEFAULT_PROMPT,
+    )
+}
+
+pub(crate) fn merge_runtime_sections(template: &str, runtime_sections: &[String]) -> String {
+    let runtime_block = runtime_sections
+        .iter()
+        .map(|section| section.trim())
+        .filter(|section| !section.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+
+    if runtime_block.is_empty() {
+        return template
+            .replace(RUNTIME_CONTEXT_MARKER, "")
+            .trim_end()
+            .to_string();
+    }
+
+    if template.contains(RUNTIME_CONTEXT_MARKER) {
+        return template.replacen(RUNTIME_CONTEXT_MARKER, &runtime_block, 1);
+    }
+
+    format!("{}\n\n{}", template.trim_end(), runtime_block)
+}
+
+fn runtime_prompt_root() -> Option<PathBuf> {
+    crate::runtime_paths::runtime_prompt_root()
+}
+
+fn load_autofix_prompt_template_from_root(
+    prompt_root: Option<&Path>,
+    embedded_default_prompt: &str,
+) -> PlannerPromptTemplate {
+    if let Some(prompt_root) = prompt_root {
+        let _ = seed_autofix_prompt_files(prompt_root, embedded_default_prompt);
+
+        let user_path = prompt_root.join(AUTOFIX_USER_PROMPT_FILE_NAME);
+        if let Ok(content) = fs::read_to_string(&user_path) {
+            return PlannerPromptTemplate {
+                display_name: "Auto-Fix Instructions".to_string(),
+                content,
+                source_label: format!("user:{}", user_path.display()),
+            };
+        }
+
+        let default_path = prompt_root.join(AUTOFIX_DEFAULT_PROMPT_FILE_NAME);
+        if let Ok(content) = fs::read_to_string(&default_path) {
+            return PlannerPromptTemplate {
+                display_name: "Auto-Fix Instructions".to_string(),
+                content,
+                source_label: format!("default:{}", default_path.display()),
+            };
+        }
+    }
+
+    PlannerPromptTemplate {
+        display_name: "Auto-Fix Instructions".to_string(),
+        content: embedded_default_prompt.to_string(),
+        source_label: "embedded:auto-fix.md".to_string(),
+    }
+}
+
+fn load_planner_prompt_template_from_root(
+    prompt_root: Option<&Path>,
+    embedded_default_prompt: &str,
+) -> PlannerPromptTemplate {
+    if let Some(prompt_root) = prompt_root {
+        let _ = seed_prompt_files(prompt_root, embedded_default_prompt);
+
+        let user_path = prompt_root.join(USER_PROMPT_FILE_NAME);
+        if let Ok(content) = fs::read_to_string(&user_path) {
+            return PlannerPromptTemplate {
+                display_name: extract_prompt_display_name(&content),
+                content,
+                source_label: format!("user:{}", user_path.display()),
+            };
+        }
+
+        let default_path = prompt_root.join(DEFAULT_PROMPT_FILE_NAME);
+        if let Ok(content) = fs::read_to_string(&default_path) {
+            return PlannerPromptTemplate {
+                display_name: extract_prompt_display_name(&content),
+                content,
+                source_label: format!("default:{}", default_path.display()),
+            };
+        }
+    }
+
+    PlannerPromptTemplate {
+        display_name: extract_prompt_display_name(embedded_default_prompt),
+        content: embedded_default_prompt.to_string(),
+        source_label: "embedded".to_string(),
+    }
+}
+
+fn extract_prompt_display_name(content: &str) -> String {
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Some(title) = trimmed.strip_prefix("#") {
+            let title = title.trim_start_matches('#').trim();
+            if !title.is_empty() {
+                return title.to_string();
+            }
+        }
+        break;
+    }
+
+    "Prompt".to_string()
+}
+
+fn seed_autofix_prompt_files(
+    prompt_root: &Path,
+    embedded_default_prompt: &str,
+) -> std::io::Result<()> {
+    fs::create_dir_all(prompt_root)?;
+
+    let default_path = prompt_root.join(AUTOFIX_DEFAULT_PROMPT_FILE_NAME);
+    let previous_default = fs::read_to_string(&default_path).ok();
+    let user_path = prompt_root.join(AUTOFIX_USER_PROMPT_FILE_NAME);
+    let existing_user = fs::read_to_string(&user_path).ok();
+
+    write_if_changed(&default_path, embedded_default_prompt)?;
+
+    // (Re)seed the user file only when it is absent or still matches the
+    // previous embedded default (i.e. the user hasn't customized it). Use
+    // `write_if_changed` so an unchanged file is never rewritten — this avoids
+    // needless disk churn on every prompt load and, because the write is
+    // atomic, keeps concurrent readers from observing a truncated file.
+    if existing_user.is_none() || previous_default.as_deref() == existing_user.as_deref() {
+        write_if_changed(&user_path, embedded_default_prompt)?;
+    }
+
+    Ok(())
+}
+
+fn seed_prompt_files(prompt_root: &Path, embedded_default_prompt: &str) -> std::io::Result<()> {
+    fs::create_dir_all(prompt_root)?;
+
+    let default_path = prompt_root.join(DEFAULT_PROMPT_FILE_NAME);
+    let previous_default = fs::read_to_string(&default_path).ok();
+    let user_path = prompt_root.join(USER_PROMPT_FILE_NAME);
+    let existing_user = fs::read_to_string(&user_path).ok();
+
+    write_if_changed(&default_path, embedded_default_prompt)?;
+
+    // See the note in `seed_autofix_prompt_files`: only (re)seed an absent or
+    // still-default user file, and route through `write_if_changed` so an
+    // unchanged file is never rewritten and concurrent readers never see a
+    // truncated file.
+    if existing_user.is_none() || previous_default.as_deref() == existing_user.as_deref() {
+        write_if_changed(&user_path, embedded_default_prompt)?;
+    }
+
+    Ok(())
+}
+
+/// Counter for unique temp-file names in [`write_atomic`]. Process-wide so
+/// concurrent writers (e.g. many tests loading prompts at once) never collide
+/// on the same staging path.
+static NEXT_TMP_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn write_if_changed(path: &Path, content: &str) -> std::io::Result<()> {
+    if let Ok(existing) = fs::read_to_string(path) {
+        if existing == content {
+            return Ok(());
+        }
+    }
+    write_atomic(path, content)
+}
+
+/// Write `content` to `path` atomically: stage into a uniquely-named temp file
+/// in the same directory, then `rename` it over the destination. On both
+/// Windows and Unix `rename` replaces the destination in a single operation, so
+/// a concurrent reader always observes either the old or the new complete file
+/// — never a half-truncated one. The shared runtime prompt root is read and
+/// seeded from many threads (notably the test suite), where a plain in-place
+/// `fs::write` truncates first and races readers down to an empty string.
+fn write_atomic(path: &Path, content: &str) -> std::io::Result<()> {
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let stem = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("prompt");
+    let unique = NEXT_TMP_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = dir.join(format!(".{}.{}.{}.tmp", stem, std::process::id(), unique));
+    fs::write(&tmp, content)?;
+    match fs::rename(&tmp, path) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = fs::remove_file(&tmp);
+            Err(e)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        load_planner_prompt_template_from_root, merge_runtime_sections, DEFAULT_PROMPT_FILE_NAME,
+        EMBEDDED_AUTOFIX_PROMPT, EMBEDDED_DEFAULT_PROMPT, RUNTIME_CONTEXT_MARKER,
+        USER_PROMPT_FILE_NAME,
+    };
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn temp_prompt_root(test_name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "wta-prompt-tests-{}-{}",
+            test_name,
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        root
+    }
+
+    #[test]
+    fn merge_runtime_sections_replaces_marker() {
+        let merged = merge_runtime_sections(
+            &format!("before\n{}\nafter", RUNTIME_CONTEXT_MARKER),
+            &[String::from("runtime block")],
+        );
+
+        assert_eq!(merged, "before\nruntime block\nafter");
+    }
+
+    #[test]
+    fn merge_runtime_sections_appends_when_marker_missing() {
+        let merged =
+            merge_runtime_sections("before", &[String::from("first"), String::from("second")]);
+
+        assert_eq!(merged, "before\n\nfirst\n\nsecond");
+    }
+
+    #[test]
+    fn merge_runtime_sections_removes_marker_when_context_is_empty() {
+        let merged =
+            merge_runtime_sections(&format!("before\n{}\nafter", RUNTIME_CONTEXT_MARKER), &[]);
+
+        assert_eq!(merged, "before\n\nafter");
+    }
+
+    #[test]
+    fn embedded_prompts_use_the_mcp_tool_schema_as_authority() {
+        for prompt in [EMBEDDED_DEFAULT_PROMPT, EMBEDDED_AUTOFIX_PROMPT] {
+            assert!(prompt.contains("provides an MCP server for this session"));
+            assert!(prompt.contains("run_command_in_current_shell"));
+            assert!(!prompt.contains("request_terminal_actions"));
+            for removed in ["terminal_send", "terminal_open", "terminal_open_and_send"] {
+                assert!(!prompt.contains(removed), "prompt still names {removed}");
+            }
+            for removed in [
+                "`run_command`",
+                "`open_workspace`",
+                "`run_command_in_workspace`",
+                "`delegate_task`",
+            ] {
+                assert!(!prompt.contains(removed), "prompt still names {removed}");
+            }
+            assert!(prompt.contains("advertised input schema as the sole authority"));
+            assert!(!prompt.contains(r#"{"type""#));
+            assert!(!prompt.contains("recommended_choice"));
+            assert!(!prompt.contains("```json"));
+        }
+        // The default prompt drives every action, so it must name each tool.
+        for tool in [
+            "run_command_in_current_shell",
+            "create_workspace",
+            "delegate_task_in_new_workspace",
+        ] {
+            assert!(
+                EMBEDDED_DEFAULT_PROMPT.contains(tool),
+                "default prompt must name {tool}"
+            );
+        }
+        assert!(EMBEDDED_DEFAULT_PROMPT
+            .contains("A requested destination alone never implies delegation"));
+        assert!(EMBEDDED_DEFAULT_PROMPT.contains("running a command in a new tab or split"));
+        assert!(EMBEDDED_DEFAULT_PROMPT.contains("only when another agent should own the work"));
+        // Autofix is deliberately restricted to `run_command_in_current_shell` — the Helper
+        // rejects any other action for an autofix turn — so naming workspace
+        // or delegation tools there would invite a call that cannot be accepted.
+        for tool in ["create_workspace", "delegate_task_in_new_workspace"] {
+            assert!(
+                !EMBEDDED_AUTOFIX_PROMPT.contains(tool),
+                "autofix prompt must not name {tool}"
+            );
+        }
+        assert!(EMBEDDED_DEFAULT_PROMPT.contains("Submit exactly one action"));
+        assert!(EMBEDDED_DEFAULT_PROMPT.contains("`request_user_input`"));
+        assert!(EMBEDDED_DEFAULT_PROMPT.contains("instead of guessing"));
+        assert!(EMBEDDED_AUTOFIX_PROMPT
+            .contains("Submit exactly one `run_command_in_current_shell` call"));
+    }
+
+    #[test]
+    fn autofix_advertises_on_demand_resolution_without_assuming_near_matches() {
+        assert!(
+            EMBEDDED_AUTOFIX_PROMPT.contains("available on demand through `wta resolve-command`")
+        );
+        assert!(EMBEDDED_AUTOFIX_PROMPT.contains("do not call it routinely for every Autofix"));
+        assert!(
+            EMBEDDED_AUTOFIX_PROMPT.contains("preserve the failing pane's `--shell` and `--cwd`")
+        );
+        assert!(EMBEDDED_AUTOFIX_PROMPT.contains(
+            "An `indeterminate` or `unsupported` result, or a failed query, \
+             does not prove that a command is missing."
+        ));
+        assert!(!EMBEDDED_AUTOFIX_PROMPT.contains("Near Matches"));
+    }
+
+    #[test]
+    fn autofix_distinguishes_obvious_typos_from_unknown_local_commands() {
+        assert!(EMBEDDED_AUTOFIX_PROMPT.contains(
+            "`gti status` -> `git status`, go directly to `run_command_in_current_shell`"
+        ));
+        assert!(EMBEDDED_AUTOFIX_PROMPT
+            .contains("Do not call the resolver or substitute other discovery tools"));
+        assert!(EMBEDDED_AUTOFIX_PROMPT
+            .contains("without claiming that installation or execution was verified"));
+        assert!(EMBEDDED_AUTOFIX_PROMPT
+            .contains("an unfamiliar local command or genuine ambiguity requires local evidence"));
+        assert!(EMBEDDED_AUTOFIX_PROMPT.contains("do not invent local command names"));
+        assert!(EMBEDDED_AUTOFIX_PROMPT
+            .contains("A command-not-found error alone does not require a query"));
+        assert!(
+            !EMBEDDED_AUTOFIX_PROMPT.contains("For an obvious typo supported by the query results")
+        );
+    }
+
+    #[test]
+    fn loader_seeds_prompt_files_and_prefers_user_prompt() {
+        let prompt_root = temp_prompt_root("prefers-user");
+        let embedded = "embedded prompt";
+        fs::create_dir_all(&prompt_root).unwrap();
+        fs::write(prompt_root.join(USER_PROMPT_FILE_NAME), "user prompt").unwrap();
+
+        let template = load_planner_prompt_template_from_root(Some(&prompt_root), embedded);
+
+        assert_eq!(template.content, "user prompt");
+        assert!(template.source_label.starts_with("user:"));
+        assert_eq!(
+            fs::read_to_string(prompt_root.join(DEFAULT_PROMPT_FILE_NAME)).unwrap(),
+            embedded
+        );
+
+        let _ = fs::remove_dir_all(prompt_root);
+    }
+
+    #[test]
+    fn loader_falls_back_to_embedded_without_prompt_root() {
+        let template = load_planner_prompt_template_from_root(None, "embedded prompt");
+
+        assert_eq!(template.content, "embedded prompt");
+        assert_eq!(template.source_label, "embedded");
+    }
+
+    #[test]
+    fn loader_updates_user_prompt_when_it_matches_previous_default() {
+        let prompt_root = temp_prompt_root("migrate-unedited-user");
+        let previous_default = "old default prompt";
+        let embedded = "new default prompt";
+
+        fs::create_dir_all(&prompt_root).unwrap();
+        fs::write(prompt_root.join(DEFAULT_PROMPT_FILE_NAME), previous_default).unwrap();
+        fs::write(prompt_root.join(USER_PROMPT_FILE_NAME), previous_default).unwrap();
+
+        let template = load_planner_prompt_template_from_root(Some(&prompt_root), embedded);
+
+        assert_eq!(template.content, embedded);
+        assert_eq!(
+            fs::read_to_string(prompt_root.join(DEFAULT_PROMPT_FILE_NAME)).unwrap(),
+            embedded
+        );
+        assert_eq!(
+            fs::read_to_string(prompt_root.join(USER_PROMPT_FILE_NAME)).unwrap(),
+            embedded
+        );
+
+        let _ = fs::remove_dir_all(prompt_root);
+    }
+
+    #[test]
+    fn loader_preserves_customized_user_prompt_when_default_changes() {
+        let prompt_root = temp_prompt_root("preserve-custom-user");
+        let previous_default = "old default prompt";
+        let embedded = "new default prompt";
+
+        fs::create_dir_all(&prompt_root).unwrap();
+        fs::write(prompt_root.join(DEFAULT_PROMPT_FILE_NAME), previous_default).unwrap();
+        fs::write(
+            prompt_root.join(USER_PROMPT_FILE_NAME),
+            "custom user prompt",
+        )
+        .unwrap();
+
+        let template = load_planner_prompt_template_from_root(Some(&prompt_root), embedded);
+
+        assert_eq!(template.content, "custom user prompt");
+        assert_eq!(
+            fs::read_to_string(prompt_root.join(DEFAULT_PROMPT_FILE_NAME)).unwrap(),
+            embedded
+        );
+        assert_eq!(
+            fs::read_to_string(prompt_root.join(USER_PROMPT_FILE_NAME)).unwrap(),
+            "custom user prompt"
+        );
+
+        let _ = fs::remove_dir_all(prompt_root);
+    }
+}

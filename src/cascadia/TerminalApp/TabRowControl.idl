@@ -1,0 +1,26 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+import "TabStrip.idl";
+
+namespace TerminalApp
+{
+    [default_interface] runtimeclass TabRowControl : Windows.UI.Xaml.Controls.ContentPresenter,
+                                                     Windows.UI.Xaml.Data.INotifyPropertyChanged
+    {
+        TabRowControl();
+        Microsoft.UI.Xaml.Controls.TabView TabView { get; };
+
+        // Spec A: when IsVerticalLayout is true, TabStrip is the live strip
+        // and the MUX TabView is hidden. Toggled once at
+        // TerminalPage::Initialize based on the tabLayout global setting;
+        // no live switching for v1.
+        TabStrip TabStrip { get; };
+        Boolean IsVerticalLayout;
+
+        Boolean ShowElevationShield;
+        Boolean ShowWorkspacesButton;
+        String WorkspaceName;
+
+        event Windows.Foundation.TypedEventHandler<TabRowControl, Object> RailCollapseRequested;
+    }
+}

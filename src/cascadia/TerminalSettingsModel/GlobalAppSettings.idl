@@ -1,0 +1,205 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
+#include "IInheritable.idl.h"
+
+import "Theme.idl";
+import "ColorScheme.idl";
+import "ActionMap.idl";
+import "NewTabMenuEntry.idl";
+import "CustomModelProvider.idl";
+
+namespace Microsoft.Terminal.Settings.Model
+{
+    // MIDL 3 allows for structs to hold nullable types
+    // Though IReference is a WinRT object, MIDL 3
+    // handles all of the ownership logic for us.
+    // Docs: https://docs.microsoft.com/en-us/uwp/midl-3/intro#types
+    struct LaunchPosition
+    {
+        Windows.Foundation.IReference<Int32> X;
+        Windows.Foundation.IReference<Int32> Y;
+    };
+
+    [flags]
+    enum LaunchMode
+    {
+        DefaultMode = 0,
+        MaximizedMode = 1,
+        FullscreenMode = 2,
+        FocusMode = 4,
+        MaximizedFocusMode = 5
+    };
+
+    enum WindowingMode
+    {
+        UseNew,
+        UseAnyExisting,
+        UseExisting,
+    };
+
+    enum FirstWindowPreference
+    {
+        DefaultProfile,
+        PersistedLayout,
+        PersistedLayoutAndContent,
+    };
+
+    enum NewTabPosition
+    {
+        AfterLastTab,
+        AfterCurrentTab,
+    };
+
+    // Spec A §1: horizontal renders the classic MUX TabView across the top;
+    // vertical renders a custom TabStrip down the left edge and silently
+    // overrides showTabsInTitlebar to false.
+    enum TabLayout
+    {
+        Horizontal,
+        Vertical,
+    };
+
+    enum ConfirmOnClose
+    {
+        Never = 0,
+        Automatic = 1,
+        Always = 2,
+    };
+
+    [default_interface] runtimeclass GlobalAppSettings {
+        Guid DefaultProfile;
+
+        INHERITABLE_SETTING(String, UnparsedDefaultProfile);
+
+        INHERITABLE_SETTING(Int32, InitialRows);
+        INHERITABLE_SETTING(Int32, InitialCols);
+        INHERITABLE_SETTING(Boolean, AlwaysShowTabs);
+        INHERITABLE_SETTING(Boolean, ShowTabsFullscreen);
+        INHERITABLE_SETTING(NewTabPosition, NewTabPosition);
+        INHERITABLE_SETTING(Boolean, ShowTitleInTitlebar);
+        INHERITABLE_SETTING(ConfirmOnClose, ConfirmOnClose);
+        INHERITABLE_SETTING(String, Language);
+        INHERITABLE_SETTING(Microsoft.UI.Xaml.Controls.TabViewWidthMode, TabWidthMode);
+        INHERITABLE_SETTING(Boolean, UseAcrylicInTabRow);
+        INHERITABLE_SETTING(Boolean, ShowTabsInTitlebar);
+        INHERITABLE_SETTING(String, WordDelimiters);
+        INHERITABLE_SETTING(Boolean, CopyOnSelect);
+        INHERITABLE_SETTING(Boolean, InputServiceWarning);
+        INHERITABLE_SETTING(Microsoft.Terminal.Control.CopyFormat, CopyFormatting);
+        INHERITABLE_SETTING(Boolean, WarnAboutLargePaste);
+        INHERITABLE_SETTING(Microsoft.Terminal.Control.WarnAboutMultiLinePaste, WarnAboutMultiLinePaste);
+        INHERITABLE_SETTING(Boolean, TrimPaste);
+        INHERITABLE_SETTING(LaunchPosition, InitialPosition);
+        INHERITABLE_SETTING(Boolean, CenterOnLaunch);
+        INHERITABLE_SETTING(Microsoft.Terminal.Control.DefaultInputScope, DefaultInputScope);
+        INHERITABLE_SETTING(FirstWindowPreference, FirstWindowPreference);
+        INHERITABLE_SETTING(LaunchMode, LaunchMode);
+        INHERITABLE_SETTING(Boolean, SnapToGridOnResize);
+        INHERITABLE_SETTING(Microsoft.Terminal.Control.GraphicsAPI, GraphicsAPI);
+        INHERITABLE_SETTING(Boolean, DisablePartialInvalidation);
+        INHERITABLE_SETTING(Boolean, SoftwareRendering);
+        INHERITABLE_SETTING(Microsoft.Terminal.Control.TextMeasurement, TextMeasurement);
+        INHERITABLE_SETTING(Microsoft.Terminal.Control.AmbiguousWidth, AmbiguousWidth);
+        INHERITABLE_SETTING(Boolean, UseBackgroundImageForWindow);
+        INHERITABLE_SETTING(Boolean, DebugFeaturesEnabled);
+        INHERITABLE_SETTING(Boolean, AlwaysOnTop);
+        INHERITABLE_SETTING(Boolean, AutoHideWindow);
+        INHERITABLE_SETTING(TabSwitcherMode, TabSwitcherMode);
+        INHERITABLE_SETTING(Boolean, DisableAnimations);
+        INHERITABLE_SETTING(String, StartupActions);
+        INHERITABLE_SETTING(Boolean, FocusFollowMouse);
+        INHERITABLE_SETTING(Boolean, ScrollToZoom);
+        INHERITABLE_SETTING(Boolean, ScrollToChangeOpacity);
+        INHERITABLE_SETTING(WindowingMode, WindowingBehavior);
+        INHERITABLE_SETTING(Boolean, TrimBlockSelection);
+        INHERITABLE_SETTING(Boolean, DetectURLs);
+        INHERITABLE_SETTING(Boolean, MinimizeToNotificationArea);
+        INHERITABLE_SETTING(Boolean, AlwaysShowNotificationIcon);
+        INHERITABLE_SETTING(IVector<String>, DisabledProfileSources);
+        INHERITABLE_SETTING(Boolean, ShowAdminShield);
+        INHERITABLE_SETTING(IVector<NewTabMenuEntry>, NewTabMenu);
+        INHERITABLE_SETTING(Boolean, EnableColorSelection);
+        INHERITABLE_SETTING(Boolean, EnableShellCompletionMenu);
+        INHERITABLE_SETTING(Boolean, EnableUnfocusedAcrylic);
+        INHERITABLE_SETTING(Boolean, AllowHeadless);
+        INHERITABLE_SETTING(String, SearchWebDefaultQueryUrl);
+        INHERITABLE_SETTING(String, AcpAgent);
+        INHERITABLE_SETTING(String, AcpModel);
+        INHERITABLE_SETTING(String, CustomModelSelection);
+        INHERITABLE_SETTING(IVector<CustomModelProvider>, CustomModelProviders);
+        INHERITABLE_SETTING(String, DelegateAgent);
+        INHERITABLE_SETTING(String, DelegateModel);
+        INHERITABLE_SETTING(Boolean, AutoErrorDetectionEnabled);
+        INHERITABLE_SETTING(Boolean, AutoFixEnabled);
+        INHERITABLE_SETTING(Boolean, ShowTokenUsageAndCost);
+        INHERITABLE_SETTING(String, AcpCustomCommand);
+        INHERITABLE_SETTING(IVector<String>, SafeUriSchemes);
+        INHERITABLE_SETTING(String, DelegateCustomCommand);
+        INHERITABLE_SETTING(String, AgentPanePosition);
+
+        // AI Integration settings
+        INHERITABLE_SETTING(Boolean, AiCoordinatorEnabled);
+        INHERITABLE_SETTING(String, AiCoordinatorCommandline);
+        INHERITABLE_SETTING(String, AiCoordinatorProfile);
+        INHERITABLE_SETTING(String, AiConfirmationReadOps);
+        INHERITABLE_SETTING(String, AiConfirmationCreateOps);
+        INHERITABLE_SETTING(String, AiConfirmationInputOps);
+
+        // Appended at the end of the interface (rather than grouped with
+        // TabWidthMode) to keep the ABI stable — inserting in the middle
+        // shifts every subsequent method's vtable slot.
+        INHERITABLE_SETTING(Int32, TabLayoutVerticalWidth);
+        INHERITABLE_SETTING(TabLayout, TabLayout);
+
+        // Policy-aware effective getters — return the setting value after
+        // applying GPO overrides. Consumers should prefer these over the
+        // raw INHERITABLE_SETTING properties for runtime decisions.
+        String EffectiveAcpAgent { get; };
+        String EffectiveDelegateAgent { get; };
+        Boolean EffectiveAutoErrorDetectionEnabled { get; };
+        Boolean EffectiveAutoFixEnabled { get; };
+
+        // Whether GPO policy is actively restricting these settings.
+        // GPO policy indicators.
+        // IsAgentPolicyLocked: AllowedAgents policy is active — agent
+        //   lists are filtered (dropdowns stay enabled, but show fewer options).
+        // IsCustomAgentPolicyLocked: AllowCustomAgents is disabled.
+        // IsAutoFixPolicyLocked / IsAgentSessionHooksPolicyLocked:
+        //   the corresponding option/button is unavailable.
+        Boolean IsAgentPolicyLocked { get; };
+        Boolean IsCustomAgentPolicyLocked { get; };
+        Boolean IsAutoFixPolicyLocked { get; };
+        Boolean IsAgentSessionHooksPolicyLocked { get; };
+
+        Windows.Foundation.Collections.IMapView<String, ColorScheme> ColorSchemes();
+        void AddColorScheme(ColorScheme scheme);
+        void RemoveColorScheme(String schemeName);
+        ColorScheme DuplicateColorScheme(ColorScheme scheme);
+
+        ActionMap ActionMap { get; };
+
+        Windows.Foundation.Collections.IMapView<String, Theme> Themes();
+        void AddTheme(Theme theme);
+        INHERITABLE_SETTING(ThemePair, Theme);
+        Theme CurrentTheme { get; };
+
+        Boolean ShouldUsePersistedLayout();
+
+        // Keep new members append-only to preserve existing WinRT vtable slots.
+        INHERITABLE_SETTING(Boolean, AgentPaneYoloMode);
+        Boolean EffectiveAgentPaneYoloMode { get; };
+        Boolean IsYoloModePolicyLocked { get; };
+
+        INHERITABLE_SETTING(IVector<String>, AcpCustomCommands);
+        INHERITABLE_SETTING(IVector<String>, DelegateCustomCommands);
+
+        INHERITABLE_SETTING(Boolean, AgentSessionManagementEnabled);
+        Boolean EffectiveAgentSessionManagementEnabled { get; };
+
+        Boolean ClearAgentPaneYoloModeIfPolicyBlocked();
+        Boolean ClearAgentPaneYoloModeIfUnavailableDefault();
+        Boolean CanEnableAgentPaneYoloMode { get; };
+        Boolean CanEnableAgentPaneYoloModeForAgent(String agentId);
+    }
+}

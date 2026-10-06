@@ -1,0 +1,34 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
+namespace Microsoft.Terminal.Settings.Model
+{
+    runtimeclass AcpModelInfo
+    {
+        AcpModelInfo(String id, String displayName, String description);
+        String Id { get; };
+        String DisplayName { get; };
+        String Description { get; };
+    }
+
+    // Process-wide cache of each ACP agent's last-known model list.
+    // TerminalApp writes via SetAvailableModels when wta pushes an
+    // `agent_status` event; TerminalSettingsEditor reads in
+    // AIAgentsViewModel's constructor to populate the model dropdown.
+    // Lives in Microsoft.Terminal.Settings.Model.dll so both consumer
+    // DLLs share one instance via the WinRT activation factory.
+    [default_interface] runtimeclass AcpRuntimeState
+    {
+        static AcpRuntimeState Current { get; };
+        Windows.Foundation.Collections.IVectorView<AcpModelInfo> AvailableModels(String agentId);
+        String CurrentModelId(String agentId);
+        UInt64 Revision(String agentId);
+        void SetAvailableModels(String agentId, Windows.Foundation.Collections.IVectorView<AcpModelInfo> models, String currentId);
+        Boolean TrySetAvailableModels(String agentId, UInt64 expectedRevision, Windows.Foundation.Collections.IVectorView<AcpModelInfo> models, String currentId);
+
+        // Fires whenever SetAvailableModels writes new data. Settings UI
+        // subscribes so the model dropdown refreshes when a probe completes
+        // or wta reconnects and publishes a new list.
+        event Windows.Foundation.TypedEventHandler<AcpRuntimeState, IInspectable> Changed;
+    }
+}

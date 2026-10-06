@@ -1,0 +1,490 @@
+parameters:
+  - name: branding
+    type: string
+    default: Dev
+  - name: additionalBuildOptions
+    type: string
+    default: ''
+  - name: buildTerminal
+    type: boolean
+    default: true
+  - name: buildConPTY
+    type: boolean
+    default: false
+  - name: buildWPF
+    type: boolean
+    default: false
+  - name: buildWPFDotNetComponents # This weird hack is to make sure we sign and source index the .NET pieces
+    type: boolean
+    default: false
+  - name: buildEverything
+    displayName: "Build Everything (Overrides all other build options)"
+    type: boolean
+    default: false
+  - name: pgoBuildMode
+    type: string
+    default: None
+    values: [Optimize, Instrument, None]
+  - name: buildConfigurations
+    type: object
+    default:
+      - Release
+  - name: buildPlatforms
+    type: object
+    default:
+      - x64
+      - x86
+      - arm64
+  - name: generateSbom
+    type: boolean
+    default: false
+  - name: codeSign
+    type: boolean
+    default: false
+  - name: keepAllExpensiveBuildOutputs
+    type: boolean
+    default: true
+  - name: artifactStem
+    type: string
+    default: ''
+  - name: jobName
+    type: string
+    default: 'Build'
+  - name: pool
+    type: object
+    default: []
+  - name: beforeBuildSteps
+    type: stepList
+    default: []
+  - name: beforeRustBuildSteps
+    # Runs BEFORE the Rust toolchain install / cargo build. Used to restore
+    # sources that `tools/wta/build.rs` reads at cargo time — notably the
+    # `terminal-internals` telemetry header overlay
+    # (`src/inc/telemetry/ProjectTelemetry.h`) and the M.W.T.V versioning step.
+    # If empty, cargo builds against the on-disk OSS sources (stub header).
+    type: stepList
+    default: []
+  - name: variables
+    type: object
+    default: {}
+  - name: publishArtifacts
+    type: boolean
+    default: true
+  - name: removeAllNonSignedFiles
+    type: boolean
+    default: false
+  - name: signingIdentity
+    type: object
+    default: {}
+  - name: enableCaching
+    type: boolean
+    default: false
+  - name: afterBuildSteps
+    type: stepList
+    default: []
+  - name: outerTemplateContext
+    type: object
+    default: {}
+
+jobs:
+- job: ${{ parameters.jobName }}
+  templateContext: ${{ parameters.outerTemplateContext }}
+  ${{ if ne(length(parameters.pool), 0) }}:
+    pool: ${{ parameters.pool }}
+  strategy:
+    matrix:
+      ${{ each config in parameters.buildConfigurations }}:
+        ${{ each platform in parameters.buildPlatforms }}:
+          ${{ config }}_${{ platform }}:
+            BuildConfiguration: ${{ config }}
+            BuildPlatform: ${{ platform }}
+            ${{ if eq(platform, 'x86') }}:
+              OutputBuildPlatform: Win32
+            ${{ elseif eq(platform, 'Any CPU') }}:
+              OutputBuildPlatform: AnyCPU
+            ${{ else }}:
+              OutputBuildPlatform: ${{ platform }}
+  variables:
+    MakeAppxPath: 'C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x86\MakeAppx.exe'
+    Terminal.BinDir: $(Build.SourcesDirectory)/bin/$(OutputBuildPlatform)/$(BuildConfiguration)
+    # Azure DevOps abhors a vacuum
+    # If these are blank, expansion will fail later on... which will result in direct substitution of the variable *names*
+    # later on. We'll just... set them to a single space and if we need to, check IsNullOrWhiteSpace.
+    # Yup.
+    BuildTargetParameter: ' '
+    SelectedSigningFragments: ' '
+    MSBuildCacheParameters: ' '
+    # When building the unpackaged distribution, build it in portable mode if it's Canary-branded
+    ${{ if eq(parameters.branding, 'Canary') }}:
+      UnpackagedBuildArguments: -PortableMode
+    ${{ else }}:
+      UnpackagedBuildArguments: ' '
+    JobOutputDirectory: $(Terminal.BinDir)
+    JobOutputArtifactName: build-$(BuildPlatform)-$(BuildConfiguration)${{ parameters.artifactStem }}
+    ${{ insert }}: ${{ parameters.variables }}
+  displayName: Build
+  timeoutInMinutes: 240
+  cancelTimeoutInMinutes: 1
+  steps:
+  - checkout: self
+    clean: true
+    submodules: true
+    persistCredentials: True
+
+  # This generates either nothing for BuildTargetParameter, or /t:X;Y;Z, to control targets later.
+  - pwsh: |-
+      If (-Not [bool]::Parse("${{ parameters.buildEverything }}")) {
+        $BuildTargets = @()
+        $SignFragments = @()
+        If ([bool]::Parse("${{ parameters.buildTerminal }}")) {
+          $BuildTargets += "Terminal\CascadiaPackage"
+          $SignFragments += "terminal_constituents"
+        }
+        If ([bool]::Parse("${{ parameters.buildWPFDotNetComponents }}")) {
+          $BuildTargets += "Terminal\wpf\WpfTerminalControl"
+          $SignFragments += "wpfdotnet"
+        }
+        If ([bool]::Parse("${{ parameters.buildWPF }}")) {
+          $BuildTargets += "Terminal\Control\TerminalControl"
+          $SignFragments += "wpf"
+        }
+        If ([bool]::Parse("${{ parameters.buildConPTY }}")) {
+          $BuildTargets += "Conhost\Host_EXE;Conhost\winconptydll"
+          $SignFragments += "conpty"
+        }
+        Write-Host "Targets: $($BuildTargets -Join ";")"
+        Write-Host "Sign targets: $($SignFragments -Join ";")"
+        Write-Host "##vso[task.setvariable variable=BuildTargetParameter]/t:$($BuildTargets -Join ";")"
+        Write-Host "##vso[task.setvariable variable=SelectedSigningFragments]$($SignFragments -Join ";")"
+      }
+    displayName: Prepare Build and Sign Targets
+
+  - ${{ if eq(parameters.enableCaching, true) }}:
+    - pwsh: |-
+        $MSBuildCacheParameters = ""
+        $MSBuildCacheParameters += " -graph"
+        $MSBuildCacheParameters += " -reportfileaccesses"
+        $MSBuildCacheParameters += " -p:MSBuildCacheEnabled=true"
+        $MSBuildCacheParameters += " -p:MSBuildCacheLogDirectory=$(Build.SourcesDirectory)\MSBuildCacheLogs"
+        Write-Host "MSBuildCacheParameters: $MSBuildCacheParameters"
+        Write-Host "##vso[task.setvariable variable=MSBuildCacheParameters]$MSBuildCacheParameters"
+      displayName: Prepare MSBuildCache variables
+
+  - pwsh: |-
+      .\build\scripts\Generate-ThirdPartyNotices.ps1 -MarkdownNoticePath .\NOTICE.md -OutputPath .\src\cascadia\CascadiaPackage\NOTICE.html
+    displayName: Generate NOTICE.html from NOTICE.md
+
+  # Steps that need to run BEFORE the Rust build — restore the sources
+  # `tools/wta/build.rs` reads at cargo time (terminal-internals telemetry
+  # header overlay + M.W.T.V versioning). See the `beforeRustBuildSteps`
+  # parameter doc above.
+  - ${{ parameters.beforeRustBuildSteps }}
+
+  # ────────────────────────────────────────────────────────────────────────
+  # Rust toolchain for wta (1ES-compliant pattern).
+  # Placed early — before vcpkg/nuget/VC-tools setup — so that Rust pipeline
+  # validation is independent of any C++ build environment problems.
+  #
+  # Compliance notes (per 1ES Rust workflow guidance):
+  #   1. Toolchain comes from the org-level `RustTools` Azure Artifact NuGet
+  #      feed (already exists on `microsoft` ADO org; same feed used by
+  #      microsoft/sudo, microsoft/vscode, microsoft/edit, microsoft/qdk).
+  #   2. Crates resolve through a project-level Azure Artifact Cargo feed
+  #      with crates.io upstream, configured in .cargo/config.toml (repo root,
+  #      generated by CI — see "Create Cargo registry config" step below).
+  #   3. The Rust version uses the `ms-prod-X.YY` channel, pinned in
+  #      `tools/wta/rust-toolchain.toml`.
+  #   4. Component Governance scanning of Cargo.lock is auto-injected by
+  #      1ES PT (no extra task needed here).
+  #
+  # Prerequisites:
+  #   - Azure Artifact Cargo feed exists in microsoft/Dart with
+  #     `crates.io` upstream. (Project-scope, terminal team can create it.)
+  #   - The CI account ("Project Collection Build Service (microsoft)") has
+  #     at least Collaborator permission on the `RustTools` feed.
+  # The `Placed early — before vcpkg/nuget/VC-tools setup — so that Rust
+  # pipeline validation is independent of any C++ build environment
+  # problems.` design property is preserved: `beforeRustBuildSteps` above
+  # only carries M.W.T.V (which is repo-source-only — it does not touch
+  # the C++ build environment), so a misconfigured vcpkg/VS install still
+  # cannot poison Rust.
+  # ────────────────────────────────────────────────────────────────────────
+  - task: RustInstaller@1
+    displayName: Install Rust toolchain (MSRustup)
+    inputs:
+      rustVersion: ms-prod-1.93
+      toolchainFeed: https://pkgs.dev.azure.com/microsoft/_packaging/RustTools/nuget/v3/index.json
+      # NOTE: we deliberately do NOT set `cratesIoFeedOverride` here. That
+      # parameter injects an env-var registry override named `ms_crates_io`
+      # which CargoAuthenticate cannot see (it scans config files, not env
+      # vars), so the override registry ends up unauthenticated and Azure
+      # Artifacts returns 404 on its sparse-index endpoint.
+      # Instead, the registry + source replacement lives in
+      # .cargo/config.toml at the repo root (generated by the next pwsh step) —
+      # CargoAuthenticate@0 (step after that) tokens it, and cargo's normal
+      # config-file resolution picks it up.
+      additionalTargets: 'x86_64-pc-windows-msvc i686-pc-windows-msvc aarch64-pc-windows-msvc'
+
+  # Append the Azure Artifacts source replacement to the repo's
+  # checked-in .cargo/config.toml. We append rather than overwrite
+  # because the repo's version carries the `+crt-static` rustflags
+  # that wta.exe needs to start without VCRUNTIME140.dll on customer
+  # machines (the package ships no VC runtime and strips the
+  # Microsoft.VCLibs dependency). The previous version of this step
+  # used `Set-Content`, which silently clobbered those rustflags and
+  # produced CI-built wta.exe binaries that failed to launch in clean
+  # environments (e.g. Windows Sandbox).
+  #
+  # 1ES build agents do a fresh checkout per run, so the file always
+  # starts from its git-pristine state — Add-Content's lack of
+  # idempotency on a hypothetical re-used workspace is not a real
+  # concern in this pipeline.
+  #
+  # Cargo discovers .cargo/config.toml by walking from the current
+  # working directory (repo root) up — NOT from the manifest directory.
+  # The config must live at the repo root, not inside tools/wta/.
+  - pwsh: |-
+      $configDir = '.cargo'
+      $configPath = Join-Path $configDir 'config.toml'
+      New-Item -ItemType Directory -Path $configDir -Force | Out-Null
+      $registry = @"
+
+      [registries]
+      WindowsTerminalCargo = { index = "sparse+https://pkgs.dev.azure.com/microsoft/Dart/_packaging/IntelligentTerminal_Cargo/Cargo/index/" }
+
+      [source.crates-io]
+      replace-with = "WindowsTerminalCargo"
+      "@
+      Add-Content -Path $configPath -Value $registry -Encoding utf8NoBOM
+      Write-Host "Updated ${configPath}:"
+      Get-Content $configPath
+    displayName: Append Cargo registry config (CI only)
+
+  # CargoAuthenticate issues a Bearer token (using System.AccessToken) for
+  # every Azure Artifacts Cargo feed referenced in the config file.
+  # Required: without it, Azure Artifacts returns 404 on the sparse index
+  # endpoint and cargo reports "config.json not found in registry".
+  # This is the canonical 1ES Rust auth pattern (mirrors microsoft/edit).
+  - task: CargoAuthenticate@0
+    displayName: Authenticate Cargo feeds
+    inputs:
+      configFile: .cargo/config.toml
+
+  # Separate fetch step: some 1ES pools disable network during the build
+  # phase. Fetching upfront keeps `cargo build --frozen` fully offline.
+  - script: cargo fetch --manifest-path tools/wta/Cargo.toml --locked
+    displayName: Fetch crates (offline-friendly)
+
+  - pwsh: |-
+      $ErrorActionPreference = 'Stop'
+      $triple = switch ('$(BuildPlatform)') {
+        'x64'   { 'x86_64-pc-windows-msvc' }
+        'x86'   { 'i686-pc-windows-msvc' }
+        'arm64' { 'aarch64-pc-windows-msvc' }
+        default { 'x86_64-pc-windows-msvc' }
+      }
+      $config = '$(BuildConfiguration)'
+      Write-Host "Building wta for $triple ($config)"
+      if ($config -eq 'Release') {
+        cargo build --manifest-path tools/wta/Cargo.toml --target $triple --frozen --release
+      } else {
+        cargo build --manifest-path tools/wta/Cargo.toml --target $triple --frozen
+      }
+      if ($LASTEXITCODE -ne 0) { throw "cargo build failed with exit code $LASTEXITCODE" }
+    displayName: Build wta (Cargo)
+
+  - pwsh: |-
+      $ErrorActionPreference = 'Stop'
+      $triple = switch ('$(BuildPlatform)') {
+        'x64'   { 'x86_64-pc-windows-msvc' }
+        'x86'   { 'i686-pc-windows-msvc' }
+        'arm64' { 'aarch64-pc-windows-msvc' }
+        default { 'x86_64-pc-windows-msvc' }
+      }
+      Write-Host "Running wta unit tests for $triple"
+      cargo test --manifest-path tools/wta/Cargo.toml --target $triple --frozen
+      if ($LASTEXITCODE -ne 0) { throw "cargo test failed with exit code $LASTEXITCODE" }
+    displayName: Test wta (Cargo)
+    condition: ne(variables['BuildPlatform'], 'arm64')
+
+  - template: .\steps-install-vcpkg.yml
+
+  - template: .\steps-restore-nuget.yml
+
+  - pwsh: |-
+      .\build\scripts\Set-LatestVCToolsVersion.ps1
+    displayName: Work around DD-1541167 (VCToolsVersion)
+
+  - ${{ parameters.beforeBuildSteps }}
+
+  - task: VSBuild@1
+    displayName: Build OpenConsole.slnx
+    inputs:
+      solution: 'OpenConsole.slnx'
+      msbuildArgs: >-
+        /p:WindowsTerminalOfficialBuild=true;WindowsTerminalBranding=${{ parameters.branding }};PGOBuildMode=${{ parameters.pgoBuildMode }}
+        ${{ parameters.additionalBuildOptions }}
+        /bl:$(Build.SourcesDirectory)\msbuild.binlog
+        $(BuildTargetParameter)
+        $(MSBuildCacheParameters)
+      platform: $(BuildPlatform)
+      configuration: $(BuildConfiguration)
+      msbuildArchitecture: x64
+      maximumCpuCount: true
+    ${{ if eq(parameters.enableCaching, true) }}:
+      env:
+        SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+
+  - ${{ if eq(parameters.publishArtifacts, true) }}:
+    - publish: $(Build.SourcesDirectory)/msbuild.binlog
+      artifact: logs-$(BuildPlatform)-$(BuildConfiguration)${{ parameters.artifactStem }}
+      condition: always()
+      displayName: Publish Build Log
+    - ${{ if eq(parameters.enableCaching, true) }}:
+      - publish: $(Build.SourcesDirectory)\MSBuildCacheLogs
+        artifact: logs-msbuildcache-$(BuildPlatform)-$(BuildConfiguration)${{ parameters.artifactStem }}
+        condition: always()
+        displayName: Publish MSBuildCache Logs
+  - ${{ else }}:
+    - task: CopyFiles@2
+      displayName: Copy Build Log
+      inputs:
+        contents: $(Build.SourcesDirectory)/msbuild.binlog
+        TargetFolder: $(Terminal.BinDir)
+    - ${{ if eq(parameters.enableCaching, true) }}:
+      - task: CopyFiles@2
+        displayName: Copy MSBuildCache Logs
+        inputs:
+          contents: $(Build.SourcesDirectory)/MSBuildCacheLogs/**
+          TargetFolder: $(Terminal.BinDir)/MSBuildCacheLogs
+
+  - ${{ parameters.afterBuildSteps }}
+
+  # This saves ~2GiB per architecture. We won't need these later.
+  # Removes:
+  # - All .lib that do not have an associated .exp (which would indicate that they are import libs)
+  # - All .pdbs from those .libs (which were only used during linking)
+  # - Directories ending in Lib (static lib projects that we fully linked into DLLs which may also contain unnecessary resources)
+  # - All LocalTests_ project outputs, as they were subsumed into TestHostApp
+  # - All PDB files inside the WindowsTerminal/ output, which do not belong there.
+  # - console.dll, which apparently breaks XFGCheck? lol.
+  - pwsh: |-
+      $binDir = '$(Terminal.BinDir)'
+      $ImportLibs = Get-ChildItem $binDir -Recurse -File -Filter '*.exp' | ForEach-Object { $_.FullName -Replace "exp$","lib" }
+      $StaticLibs = Get-ChildItem $binDir -Recurse -File -Filter '*.lib' | Where-Object FullName -NotIn $ImportLibs
+
+      $Items = @()
+      $Items += $StaticLibs
+      $Items += Get-Item ($StaticLibs.FullName -Replace "lib$","pdb") -ErrorAction:Ignore
+      $Items += Get-ChildItem $binDir -Directory -Filter '*Lib'
+      $Items += Get-ChildItem $binDir -Directory -Filter 'LocalTests_*'
+      $Items += Get-ChildItem "${$binDir}\WindowsTerminal" -Filter '*.pdb' -ErrorAction:Ignore
+
+      If (-Not [bool]::Parse('${{ parameters.keepAllExpensiveBuildOutputs }}')) {
+        $Items += Get-ChildItem '$(Terminal.BinDir)' -Filter '*.pdb' -Recurse
+      }
+
+      $Items += Get-ChildItem $binDir -Filter 'console.dll'
+
+      $Items | Remove-Item -Recurse -Force -Verbose -ErrorAction:Ignore
+    displayName: Clean up static libs and extra symbols
+    errorActionPreference: silentlyContinue # It's OK if this silently fails
+
+  # We cannot index PDBs that we have deleted!
+  - ${{ if eq(parameters.keepAllExpensiveBuildOutputs, true) }}:
+    - pwsh: |-
+        build\scripts\Index-Pdbs.ps1 -SearchDir '$(Terminal.BinDir)' -SourceRoot '$(Build.SourcesDirectory)' -recursive -Verbose -CommitId $(Build.SourceVersion)
+      displayName: Source Index PDBs
+      errorActionPreference: silentlyContinue
+
+  - ${{ if or(parameters.buildTerminal, parameters.buildEverything) }}:
+    - pwsh: |-
+        $Package = (Get-ChildItem -Recurse -Filter "CascadiaPackage*.msix" | Select -First 1)
+        $PackageFilename = $Package.FullName
+        Write-Host "##vso[task.setvariable variable=WindowsTerminalPackagePath]${PackageFilename}"
+      displayName: Locate the MSIX
+
+    # CHECK EXCEPTION
+    # PGO requires a desktop CRT
+    - ${{ if ne(parameters.pgoBuildMode, 'Instrument') }}:
+      - pwsh: |-
+          .\build\scripts\Test-WindowsTerminalPackage.ps1 -Verbose -Path "$(WindowsTerminalPackagePath)"
+        displayName: Check MSIX for common regressions
+        condition: and(succeeded(), ne(variables.WindowsTerminalPackagePath, ''))
+      
+    - ${{ if eq(parameters.codeSign, true) }}:
+      - pwsh: |-
+          & "$(MakeAppxPath)" unpack /p "$(WindowsTerminalPackagePath)" /d "$(Terminal.BinDir)/PackageContents"
+        displayName: Unpack the MSIX for signing
+
+  - ${{ if eq(parameters.codeSign, true) }}:
+    - template: steps-create-signing-config.yml
+      parameters:
+        outFile: '$(Build.SourcesDirectory)/ESRPSigningConfig.json'
+        stage: build
+        fragments: $(SelectedSigningFragments)
+
+    # Code-sign everything we just put together.
+    # We run the signing in Terminal.BinDir, because all of the signing batches are relative to the final architecture/configuration output folder.
+    - template: steps-esrp-signing.yml
+      parameters:
+        displayName: Submit Signing Request
+        signingIdentity: ${{ parameters.signingIdentity }}
+        inputs:
+          FolderPath: '$(Terminal.BinDir)'
+          signType: batchSigning
+          batchSignPolicyFile: '$(Build.SourcesDirectory)/ESRPSigningConfig.json'
+
+    # We only need to re-pack the MSIX if we actually signed, so this can stay in the codeSign conditional
+    - ${{ if or(parameters.buildTerminal, parameters.buildEverything) }}:
+      - pwsh: |-
+          $outDir = New-Item -Type Directory "$(Terminal.BinDir)/_appx" -ErrorAction:Ignore
+          $PackageFilename = Join-Path $outDir.FullName (Split-Path -Leaf "$(WindowsTerminalPackagePath)")
+          & "$(MakeAppxPath)" pack /h SHA256 /o /p $PackageFilename /d "$(Terminal.BinDir)/PackageContents"
+          Write-Host "##vso[task.setvariable variable=WindowsTerminalPackagePath]${PackageFilename}"
+        displayName: Re-pack the new Terminal package after signing
+
+    # Some of our governed pipelines explicitly fail builds that have *any* non-codesigned filed (!)
+    - ${{ if eq(parameters.removeAllNonSignedFiles, true) }}:
+      - pwsh: |-
+          Get-ChildItem "$(Terminal.BinDir)" -Recurse -Include "*.dll","*.exe" |
+            Where-Object { (Get-AuthenticodeSignature $_).Status -Ne "Valid" } |
+            Remove-Item -Verbose -Force
+        displayName: Remove all non-signed output files
+
+  - ${{ else }}: # No Signing
+    - ${{ if or(parameters.buildTerminal, parameters.buildEverything) }}:
+      - pwsh: |-
+          $outDir = New-Item -Type Directory "$(Terminal.BinDir)/_appx" -ErrorAction:Ignore
+          $PackageFilename = Join-Path $outDir.FullName (Split-Path -Leaf "$(WindowsTerminalPackagePath)")
+          Copy-Item "$(WindowsTerminalPackagePath)" $PackageFilename
+          Write-Host "##vso[task.setvariable variable=WindowsTerminalPackagePath]${PackageFilename}"
+        displayName: Stage the package (unsigned)
+        condition: and(succeeded(), ne(variables.WindowsTerminalPackagePath, ''))
+
+  - ${{ if or(parameters.buildTerminal, parameters.buildEverything) }}:
+    - pwsh: |-
+        $XamlAppxPath = (Get-Item "src\cascadia\CascadiaPackage\AppPackages\*\Dependencies\$(BuildPlatform)\Microsoft.UI.Xaml*.appx").FullName
+        $outDir = New-Item -Type Directory "$(Terminal.BinDir)/_unpackaged" -ErrorAction:Ignore
+        & .\build\scripts\New-UnpackagedTerminalDistribution.ps1 $(UnpackagedBuildArguments) -TerminalAppX $(WindowsTerminalPackagePath) -XamlAppX $XamlAppxPath -Destination $outDir.FullName
+      displayName: Build Unpackaged Distribution (from MSIX)
+      condition: and(succeeded(), ne(variables.WindowsTerminalPackagePath, ''))
+
+  - ${{ if eq(parameters.generateSbom, true) }}:
+    - task: AzureArtifacts.manifest-generator-task.manifest-generator-task.ManifestGeneratorTask@0
+      displayName: 'Generate SBOM manifest'
+      inputs:
+        BuildDropPath: '$(Terminal.BinDir)'
+
+    - task: DropValidatorTask@0
+      displayName: 'Validate SBOM manifest'
+      inputs:
+        BuildDropPath: '$(Terminal.BinDir)'
+        OutputPath: 'output.json'
+        ValidateSignature: true
+        Verbosity: 'Verbose'
+
+  - ${{ if eq(parameters.publishArtifacts, true) }}:
+    - publish: $(Terminal.BinDir)
+      artifact: $(JobOutputArtifactName)
+      displayName: Publish All Outputs

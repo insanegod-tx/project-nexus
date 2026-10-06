@@ -1,0 +1,1645 @@
+﻿<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<root>
+  <!-- 
+    Microsoft ResX Schema 
+    
+    Version 2.0
+    
+    The primary goals of this format is to allow a simple XML format 
+    that is mostly human readable. The generation and parsing of the 
+    various data types are done through the TypeConverter classes 
+    associated with the data types.
+    
+    Example:
+    
+    ... ado.net/XML headers & schema ...
+    <resheader name="resmimetype">text/microsoft-resx</resheader>
+    <resheader name="version">2.0</resheader>
+    <resheader name="reader">System.Resources.ResXResourceReader, System.Windows.Forms, ...</resheader>
+    <resheader name="writer">System.Resources.ResXResourceWriter, System.Windows.Forms, ...</resheader>
+    <data name="Name1"><value>this is my long string</value><comment>this is a comment</comment></data>
+    <data name="Color1" type="System.Drawing.Color, System.Drawing">Blue</data>
+    <data name="Bitmap1" mimetype="application/x-microsoft.net.object.binary.base64">
+        <value>[base64 mime encoded serialized .NET Framework object]</value>
+    </data>
+    <data name="Icon1" type="System.Drawing.Icon, System.Drawing" mimetype="application/x-microsoft.net.object.bytearray.base64">
+        <value>[base64 mime encoded string representing a byte array form of the .NET Framework object]</value>
+        <comment>This is a comment</comment>
+    </data>
+                
+    There are any number of "resheader" rows that contain simple 
+    name/value pairs.
+    
+    Each data row contains a name, and value. The row also contains a 
+    type or mimetype. Type corresponds to a .NET class that support 
+    text/value conversion through the TypeConverter architecture. 
+    Classes that don't support this are serialized and stored with the 
+    mimetype set.
+    
+    The mimetype is used for serialized objects, and tells the 
+    ResXResourceReader how to depersist the object. This is currently not 
+    extensible. For a given mimetype the value must be set accordingly:
+    
+    Note - application/x-microsoft.net.object.binary.base64 is the format 
+    that the ResXResourceWriter will generate, however the reader can 
+    read any of the formats listed below.
+    
+    mimetype: application/x-microsoft.net.object.binary.base64
+    value   : The object must be serialized with 
+            : System.Runtime.Serialization.Formatters.Binary.BinaryFormatter
+            : and then encoded with base64 encoding.
+    
+    mimetype: application/x-microsoft.net.object.soap.base64
+    value   : The object must be serialized with 
+            : System.Runtime.Serialization.Formatters.Soap.SoapFormatter
+            : and then encoded with base64 encoding.
+
+    mimetype: application/x-microsoft.net.object.bytearray.base64
+    value   : The object must be serialized into a byte array 
+            : using a System.ComponentModel.TypeConverter
+            : and then encoded with base64 encoding.
+    -->
+  <xsd:schema id="root" xmlns="" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:msdata="urn:schemas-microsoft-com:xml-msdata">
+    <xsd:import namespace="http://www.w3.org/XML/1998/namespace" />
+    <xsd:element name="root" msdata:IsDataSet="true">
+      <xsd:complexType>
+        <xsd:choice maxOccurs="unbounded">
+          <xsd:element name="metadata">
+            <xsd:complexType>
+              <xsd:sequence>
+                <xsd:element name="value" type="xsd:string" minOccurs="0" />
+              </xsd:sequence>
+              <xsd:attribute name="name" use="required" type="xsd:string" />
+              <xsd:attribute name="type" type="xsd:string" />
+              <xsd:attribute name="mimetype" type="xsd:string" />
+              <xsd:attribute ref="xml:space" />
+            </xsd:complexType>
+          </xsd:element>
+          <xsd:element name="assembly">
+            <xsd:complexType>
+              <xsd:attribute name="alias" type="xsd:string" />
+              <xsd:attribute name="name" type="xsd:string" />
+            </xsd:complexType>
+          </xsd:element>
+          <xsd:element name="data">
+            <xsd:complexType>
+              <xsd:sequence>
+                <xsd:element name="value" type="xsd:string" minOccurs="0" msdata:Ordinal="1" />
+                <xsd:element name="comment" type="xsd:string" minOccurs="0" msdata:Ordinal="2" />
+              </xsd:sequence>
+              <xsd:attribute name="name" type="xsd:string" use="required" msdata:Ordinal="1" />
+              <xsd:attribute name="type" type="xsd:string" msdata:Ordinal="3" />
+              <xsd:attribute name="mimetype" type="xsd:string" msdata:Ordinal="4" />
+              <xsd:attribute ref="xml:space" />
+            </xsd:complexType>
+          </xsd:element>
+          <xsd:element name="resheader">
+            <xsd:complexType>
+              <xsd:sequence>
+                <xsd:element name="value" type="xsd:string" minOccurs="0" msdata:Ordinal="1" />
+              </xsd:sequence>
+              <xsd:attribute name="name" type="xsd:string" use="required" />
+            </xsd:complexType>
+          </xsd:element>
+        </xsd:choice>
+      </xsd:complexType>
+    </xsd:element>
+  </xsd:schema>
+  <resheader name="resmimetype">
+    <value>text/microsoft-resx</value>
+  </resheader>
+  <resheader name="version">
+    <value>2.0</value>
+  </resheader>
+  <resheader name="reader">
+    <value>System.Resources.ResXResourceReader, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </resheader>
+  <resheader name="writer">
+    <value>System.Resources.ResXResourceWriter, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </resheader>
+  <data name="InitialJsonParseErrorText" xml:space="preserve">
+    <value>Şετťĭиġś ςòűłď йσт ьé ŀŏдðéď ƒřǿм ƒīļē. Ĉнėćķ ƒσŗ ŝуήтª× ĕяŗбґş, ιйçľůďĩηĝ тŗāіļīňġ ćǿмmāŝ. !!! !!! !!! !!! !!! !!! !!! !!! !!!</value>
+  </data>
+  <data name="MissingDefaultProfileText" xml:space="preserve">
+    <value>Ĉōûłδ πбτ ƒΐпď ýǿύѓ ďēƒдûľт ρŕõƒĩłę ìń ўôùґ ļïѕτ ǿƒ φѓôƒĭłеś - µšìήğ ţнε ƒįŗѕт ρřόƒїłê. Ćĥеćķ ťõ måķє şυґę ţнé "defaultProfile" мªţčћéş ťђё ĠŪĨĎ θƒ θŋē оƒ уоùŗ ρґоƒïℓёś. !!! !!! !!! !!! !!! !!! !!! !!! !!! !!! !!! !!! !!! !!! !!! !!! !!!</value>
+    <comment>{Locked="\"defaultProfile\""}</comment>
+  </data>
+  <data name="DuplicateProfileText" xml:space="preserve">
+    <value>₣óŭиď мύŀťìрŀэ φŕσƒïĺєś ẃïτћ ŧнě ѕámĕ ĠŲІÐ įй ўоűя ѕĕţţîήĝš ƒìŀė - įģŉǿřΐⁿğ δûρľΐçâтéŝ. Мãĸё śμѓέ ĕáĉћ ρяσƒîĺė'ѕ ĢŰĮÐ īş ϋńîqџë. !!! !!! !!! !!! !!! !!! !!! !!! !!! !!! !!! !!! !!</value>
+  </data>
+  <data name="UnknownColorSchemeText" xml:space="preserve">
+    <value>₣ŏúņđ ā ρřόƒįľĕ щĭťћ ǻή ϊпνåŀίď "colorScheme". Ďēƒāúłтіиğ ţħąţ ряόƒίŀе ţŏ тĥέ ðеƒãµľţ çбĺбŗś. Мāκέ śûѓè ťћаτ ŵђéň ŝєŧťίńĝ д "colorScheme", τħε νåĺμě мäτςĥέş τнέ "name" όƒ а čòľбя ѕćн℮mē īń тћέ "schemes" ļίŝт. !!! !!! !!! !!! !!! !!! !!! !!! !!! !!! !!! !!! !!! !!! !!! !!! !!! !!! !!! !!! !!</value>
+    <comment>{Locked="\"colorScheme\"","\"name\"","\"schemes\""}</comment>
+  </data>
+  <data name="NoProfilesText" xml:space="preserve">
+    <value>Ňǿ ρяóƒíℓěş щ℮ŕέ ƒòμйδ ϊη ỳοūґ ś℮ŧтĭπģѕ. !!! !!! !!! !!!</value>
+  </data>
+  <data name="AllProfilesHiddenText" xml:space="preserve">
+    <value>Аℓł ρяοƒįłέš ωèяê ђΐđðěŉ îη ўőϋř śěŧτϊиģş. Ϋŏυ müѕŧ ħäνė άţ ļεǻѕτ οñє пóй-ћίďðēŉ φŗóƒįŀē. !!! !!! !!! !!! !!! !!! !!! !!! !!!</value>
+  </data>
+  <data name="ReloadJsonParseErrorText" xml:space="preserve">
+    <value>Ѕєŧτĩņğš ¢ŏûłď ποţ ьė řëĺбάδзď ƒŕŏм ƒίľе. Çĥэςκ ƒõг şÿπţаж ěгяōŗš, îņ¢ŀύðīⁿğ ťŕăïŀĩπĝ čǿmмãş. !!! !!! !!! !!! !!! !!! !!! !!! !!! </value>
+  </data>
+  <data name="UsingDefaultSettingsText" xml:space="preserve">
+    <value>Ťемрőŗāřĩľŷ űśϊⁿģ ťђё Щìπδоωş Ţεѓмîήäĺ δêƒаμłт şèţτïńġś. !!! !!! !!! !!! !!! !</value>
+  </data>
+  <data name="InitialJsonParseErrorTitle" xml:space="preserve">
+    <value>₣äĩľєď τσ ŀőåð ŝέťţĩⁿģŝ !!! !!! </value>
+  </data>
+  <data name="SettingsValidateErrorTitle" xml:space="preserve">
+    <value>Εŋĉőųņŧзяëď зяѓōяś ŵħΐļê ŀθαðĩήġ ùŝéѓ śзťŧĭпģŝ !!! !!! !!! !!! !</value>
+  </data>
+  <data name="KeyboardServiceWarningText" xml:space="preserve">
+    <value>Ŧħє "{0}" ĭşп'ţ řμллĭиġ оŉ ўόùг мàςĥįńë. Ŧħїś ¢áⁿ φřэνєńτ тнэ Тэґмïñăĺ ƒŕöm ŗеς℮íνίиĝ ķēỳвŏαŗδ ĭⁿрΰţ. !!! !!! !!! !!! !!! !!! !!! !!! !!! !!!</value>
+    <comment>{0} will be replaced with the OS-localized name of the TabletInputService</comment>
+  </data>
+  <data name="Ok" xml:space="preserve">
+    <value>ФĶ </value>
+  </data>
+  <data name="ReloadJsonParseErrorTitle" xml:space="preserve">
+    <value>₣áĭļèđ ťσ ѓéłøǻð şèŧŧíпĝŝ !!! !!! !</value>
+  </data>
+  <data name="AboutMenuItem" xml:space="preserve">
+    <value>∆вòΰŧ !</value>
+  </data>
+  <data name="SettingsMenuItem" xml:space="preserve">
+    <value>Śêŧťіňğŝ !!</value>
+  </data>
+  <data name="MultiplePanes" xml:space="preserve">
+    <value>Мµļтíрłĕ φдпėŝ !!! !</value>
+  </data>
+  <data name="TabCloseSubMenu" xml:space="preserve">
+    <value>Ćļôŝέ !</value>
+  </data>
+  <data name="TabMoveSubMenu" xml:space="preserve">
+    <value>Μòνë ťäв !!</value>
+  </data>
+  <data name="TabCloseAfter" xml:space="preserve">
+    <value>Ċĺοşέ ţаъş ťό ŧђé яΐğђт !!! !!! </value>
+  </data>
+  <data name="TabCloseBelow" xml:space="preserve">
+    <value>Ċĺőѕé ťªвѕ вéĺőŵ !!! !!!</value>
+  </data>
+  <data name="VerticalTabsCollapsePane" xml:space="preserve">
+    <value>Ċőĺĺªρѕé ѕĭđéвªя !!! !!!</value>
+    <comment>Tooltip and accessible name for the vertical tabs sidebar toggle button. Refers to the left sidebar, not the Agent Pane.</comment>
+  </data>
+  <data name="VerticalTabsExpandPane" xml:space="preserve">
+    <value>É×ρªñđ ѕĭđéвªя !!! !!!</value>
+    <comment>Tooltip and accessible name for the vertical tabs sidebar toggle button. Refers to the left sidebar, not the Agent Pane.</comment>
+  </data>
+  <data name="VerticalTabsExpandGroup" xml:space="preserve">
+    <value>É×ρªñđ ťªв ğřőµρ !!! !!!</value>
+    <comment>Accessibility name and tooltip for the button that expands a group of tabs in the sidebar.</comment>
+  </data>
+  <data name="VerticalTabsCollapseGroup" xml:space="preserve">
+    <value>Ċőĺĺªρѕé ťªв ğřőµρ !!! !!!</value>
+    <comment>Accessibility name and tooltip for the button that collapses a group of tabs in the sidebar.</comment>
+  </data>
+  <data name="VerticalTabsFallbackTabTitle" xml:space="preserve">
+    <value>Ťªв !!!</value>
+    <comment>Fallback title for a terminal tab in the sidebar when no title is available.</comment>
+  </data>
+  <data name="VerticalTabsHeader.Text" xml:space="preserve">
+    <value>Ťªвѕ !!!</value>
+  </data>
+  <data name="VerticalTabsSearchButton.[using:Windows.UI.Xaml.Automation]AutomationProperties.Name" xml:space="preserve">
+    <value>Ѕéªяċħ ťªвѕ !!!</value>
+  </data>
+  <data name="VerticalTabsSearchButton.[using:Windows.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
+    <value>Ѕéªяċħ ťªвѕ !!!</value>
+  </data>
+  <data name="VerticalTabsSearchBox.PlaceholderText" xml:space="preserve">
+    <value>Ѕéªяċħ ťªвѕ !!!</value>
+  </data>
+  <data name="VerticalTabsSearchBox.[using:Windows.UI.Xaml.Automation]AutomationProperties.Name" xml:space="preserve">
+    <value>Ѕéªяċħ ťªвѕ !!!</value>
+  </data>
+  <data name="VerticalTabsFilterButton.[using:Windows.UI.Xaml.Automation]AutomationProperties.Name" xml:space="preserve">
+    <value>₣ĭĺťéя ťªвѕ !!!</value>
+  </data>
+  <data name="VerticalTabsFilterButton.[using:Windows.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
+    <value>₣ĭĺťéя ťªвѕ !!!</value>
+  </data>
+  <data name="VerticalTabsFilterSection.Text" xml:space="preserve">
+    <value>₣ĭĺťéя !!!</value>
+    <comment>Section heading above the controls that filter which tabs are shown in the sidebar.</comment>
+  </data>
+  <data name="VerticalTabsFilterAllTabs.Text" xml:space="preserve">
+    <value>Āĺĺ ťªвѕ !!!</value>
+  </data>
+  <data name="VerticalTabsFilterAgentsOnly.Text" xml:space="preserve">
+    <value>Āğéñťѕ őñĺý !!!</value>
+  </data>
+  <data name="VerticalTabsMetadataSection.Text" xml:space="preserve">
+    <value>Ťªв méťªđªťª !!!</value>
+    <comment>Section heading above the options that choose which metadata appears in sidebar tab rows.</comment>
+  </data>
+  <data name="VerticalTabsMetadataAgentStatus.Text" xml:space="preserve">
+    <value>Āğéñť ѕťªťūѕ !!!</value>
+    <comment>Option that shows an agent's current status in sidebar tab rows.</comment>
+  </data>
+  <data name="VerticalTabsMetadataWorkingDirectory.Text" xml:space="preserve">
+    <value>Ċūяяéñť ŵőяķĭñğ đĭяéçťőяý !!! !!!</value>
+    <comment>Option that shows the current working directory in sidebar tab rows.</comment>
+  </data>
+  <data name="VerticalTabsMetadataRepository.Text" xml:space="preserve">
+    <value>Ğĭť яéρőѕĭťőяý !!!</value>
+    <comment>Option that shows the Git repository name in sidebar tab rows.</comment>
+  </data>
+  <data name="VerticalTabsMetadataBranch.Text" xml:space="preserve">
+    <value>Ğĭť вяªñçħ !!!</value>
+    <comment>Option that shows the Git branch name in sidebar tab rows.</comment>
+  </data>
+  <data name="VerticalTabsMetadataChanges.Text" xml:space="preserve">
+    <value>Ğĭť çħªñğéѕ !!!</value>
+    <comment>Option that shows the Git working tree change summary in sidebar tab rows.</comment>
+  </data>
+  <data name="VerticalTabsFilterStatusSingle" xml:space="preserve">
+    <value>Ѕħőŵĭñğ 1 ªğéñť ѕéѕѕĭőñ !!! !!!</value>
+  </data>
+  <data name="VerticalTabsFilterStatusPlural" xml:space="preserve">
+    <value>Ѕħőŵĭñğ {0} ªğéñť ѕéѕѕĭőñѕ !!! !!!</value>
+  </data>
+  <data name="VerticalTabsFilterCurrentHidden.[using:Windows.UI.Xaml.Automation]AutomationProperties.Name" xml:space="preserve">
+    <value>Ċūяяéñť ťªв ĭѕ ħĭđđéñ вý ťħĭѕ ƒĭĺťéя !!! !!! !!! !!!</value>
+  </data>
+  <data name="VerticalTabsFilterCurrentHidden.[using:Windows.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
+    <value>Ċūяяéñť ťªв ĭѕ ħĭđđéñ вý ťħĭѕ ƒĭĺťéя !!! !!! !!! !!!</value>
+  </data>
+  <data name="VerticalTabsFilterShowAll.[using:Windows.UI.Xaml.Automation]AutomationProperties.Name" xml:space="preserve">
+    <value>Ѕħőŵ ªĺĺ ťªвѕ !!! !!!</value>
+  </data>
+  <data name="VerticalTabsFilterShowAll.[using:Windows.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
+    <value>Ѕħőŵ ªĺĺ ťªвѕ !!! !!!</value>
+  </data>
+  <data name="VerticalTabsHistoryButton.[using:Windows.UI.Xaml.Automation]AutomationProperties.Name" xml:space="preserve">
+    <value>Āğéñťѕ !!!</value>
+    <comment>Accessible name of the toolbar button that opens the Agents sidebar view. Agents are AI agents, not human representatives; the view lists their live and historical sessions.</comment>
+  </data>
+  <data name="VerticalTabsHistoryButton.[using:Windows.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
+    <value>Āğéñťѕ !!!</value>
+    <comment>Tooltip for the toolbar button that opens the Agents sidebar view. Agents are AI agents, not human representatives; the view lists their live and historical sessions.</comment>
+  </data>
+  <data name="VerticalTabsHistoryHeader.Text" xml:space="preserve">
+    <value>Āğéñťѕ !!!</value>
+    <comment>Header of the Agents sidebar view. Agents are AI agents, not human representatives; the view lists their live and historical sessions.</comment>
+  </data>
+  <data name="VerticalTabsHistoryCloseButton.[using:Windows.UI.Xaml.Automation]AutomationProperties.Name" xml:space="preserve">
+    <value>Ċĺőѕé Āğéñťѕ vîêŵ !!! !!!</value>
+    <comment>Accessible name of the button that closes the Agents sidebar view. Closing this view hides the sidebar; it does not terminate any agents or sessions.</comment>
+  </data>
+  <data name="VerticalTabsHistoryCloseButton.[using:Windows.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
+    <value>Ċĺőѕé Āğéñťѕ vîêŵ !!! !!!</value>
+    <comment>Tooltip for the button that closes the Agents sidebar view. Closing this view hides the sidebar; it does not terminate any agents or sessions.</comment>
+  </data>
+  <data name="VerticalTabsHistorySearchBox.PlaceholderText" xml:space="preserve">
+    <value>Ѕéªяċħ ªğéñť ѕéѕѕĭőñ !!! !!!</value>
+  </data>
+  <data name="VerticalTabsHistorySearchBox.[using:Windows.UI.Xaml.Automation]AutomationProperties.Name" xml:space="preserve">
+    <value>Ѕéªяċħ ªğéñť ѕéѕѕĭőñ !!! !!!</value>
+  </data>
+  <data name="VerticalTabsHistoryCurrentSession" xml:space="preserve">
+    <value>[!! Çûŕŕéñţ ѕéѕѕĭőñ !!]</value>
+    <comment>UI Automation status for the live AI-agent session associated with the active terminal pane. This identifies the currently displayed session, not keyboard selection or the most recent session.</comment>
+  </data>
+  <data name="VerticalTabsHistoryEmpty" xml:space="preserve">
+    <value>Ñő ªğéñť ѕéѕѕĭőñѕ ƒőūñđ. !!! !!!</value>
+  </data>
+  <data name="VerticalTabsHistoryNoMatches" xml:space="preserve">
+    <value>Ñő мªťċħĭñğ ªğéñť ѕéѕѕĭőñѕ. !!! !!!</value>
+  </data>
+  <data name="VerticalTabsHistoryLoadError" xml:space="preserve">
+    <value>Ūñªвĺé ťő ĺőªđ ªğéñť ѕéѕѕĭőñѕ. !!! !!! !!!</value>
+    <comment>Error shown when the Agent sessions sidebar view cannot load its list of live and historical AI-agent sessions. This refers to loading the session list, not starting or resuming a session.</comment>
+  </data>
+  <data name="VerticalTabsHistoryInvalidResponse" xml:space="preserve">
+    <value>Ūñªвĺé ťő ĺőªđ ªğéñť ѕéѕѕĭőñѕ: ĭñνªĺĭđ яéѕρőñѕé. !!! !!! !!! !!!</value>
+    <comment>Error shown when the Agent sessions sidebar receives an invalid response while loading its list of live and historical AI-agent sessions.</comment>
+  </data>
+  <data name="VerticalTabsHistoryActivationError" xml:space="preserve">
+    <value>Ūñªвĺé ťő ªċťĭνªťé ťħé ѕéĺéċťéđ ѕéѕѕĭőñ. !!! !!! !!!</value>
+  </data>
+  <data name="VerticalTabsHistoryLiveAgentTitleFormat" xml:space="preserve">
+    <value>{0} ªğéñť ѕéѕѕĭőñ !!! !!!</value>
+    <comment>History row title for a live agent-pane session whose provider did not supply a conversation title. {0} is the provider display name.</comment>
+  </data>
+  <data name="CompactNewTabButton.[using:Windows.UI.Xaml.Automation]AutomationProperties.Name" xml:space="preserve">
+    <value>Ñéŵ ťªв !!!</value>
+  </data>
+  <data name="CompactNewTabButton.[using:Windows.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
+    <value>Ñéŵ ťªв !!!</value>
+  </data>
+  <data name="CompactNewTabMenuButton.[using:Windows.UI.Xaml.Automation]AutomationProperties.Name" xml:space="preserve">
+    <value>Ñéŵ ťªв мéñū !!! !!!</value>
+  </data>
+  <data name="CompactNewTabMenuButton.[using:Windows.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
+    <value>Ñéŵ ťªв мéñū !!! !!!</value>
+  </data>
+  <data name="TabCloseOther" xml:space="preserve">
+    <value>Ćĺόѕ℮ őтђèř ŧâьś !!! !</value>
+  </data>
+  <data name="TabClose" xml:space="preserve">
+    <value>Сĺôšę ťăв !!!</value>
+  </data>
+  <data name="PaneClose" xml:space="preserve">
+    <value>Ćŀöśё ρаņé !!!</value>
+  </data>
+  <data name="SplitTabText" xml:space="preserve">
+    <value>Šрľīτ τàв !!!</value>
+  </data>
+  <data name="SplitPaneText" xml:space="preserve">
+    <value>Šрŀіт φªňë !!!</value>
+  </data>
+  <data name="SplitPaneToolTipText" xml:space="preserve">
+    <value>Ґΐĝĥτ ςļìск ƒôŗ ѕрℓΐť δįяęčŧįόпŝ - гΐġћŧ/đôшň/µρ/ľëƒт !!! !!! !!! !!! !!! </value>
+  </data>
+  <data name="SplitPaneDownText" xml:space="preserve">
+    <value>Śφľīţ φǻńě ðбẃή !!! !</value>
+  </data>
+  <data name="SplitPaneRightText" xml:space="preserve">
+    <value>Śрĺїť рâйê řіġнţ !!! !</value>
+  </data>
+  <data name="SplitPaneUpText" xml:space="preserve">
+    <value>Ŝрļįŧ рâⁿë ūφ !!! </value>
+  </data>
+  <data name="SplitPaneLeftText" xml:space="preserve">
+    <value>Ѕрľîţ φâиè ļзƒţ !!! !</value>
+  </data>
+  <data name="SplitPaneDuplicateText" xml:space="preserve">
+    <value>Đύрľįčäтè !!!</value>
+  </data>
+  <data name="SwapPaneText" xml:space="preserve">
+    <value>Šŵάφ рąņё !!!</value>
+  </data>
+  <data name="SwapPaneDownText" xml:space="preserve">
+    <value>Ѕщǻφ ρåπê ďōщπ !!! !</value>
+  </data>
+  <data name="SwapPaneRightText" xml:space="preserve">
+    <value>Şώǻρ ρâпέ ŕïġђţ !!! !</value>
+  </data>
+  <data name="SwapPaneUpText" xml:space="preserve">
+    <value>Śωãр φàňє цр !!! </value>
+  </data>
+  <data name="SwapPaneLeftText" xml:space="preserve">
+    <value>Šŵªφ ρäήę łеƒť !!! !</value>
+  </data>
+  <data name="TogglePaneZoomText" xml:space="preserve">
+    <value>Тøģġľε φªηê żοбм !!! !</value>
+  </data>
+  <data name="CloseOtherPanesText" xml:space="preserve">
+    <value>Ċłǿѕē ōŧĥзŗ рάпèś !!! !!</value>
+  </data>
+  <data name="SearchWebText" xml:space="preserve">
+    <value>Ẅёв şĕаŕčĥ !!!</value>
+  </data>
+  <data name="TabColorChoose" xml:space="preserve">
+    <value>Ċħāņğě τāв ςōĺöя !!! !</value>
+  </data>
+  <data name="TabColorCustomButton.Content" xml:space="preserve">
+    <value>Ċµѕťøм !</value>
+  </data>
+  <data name="TabColorClearButton.Content" xml:space="preserve">
+    <value>Яěšěŧ !</value>
+  </data>
+  <data name="RenameTabText" xml:space="preserve">
+    <value>Γεñамē ťãв !!!</value>
+  </data>
+  <data name="DuplicateTabText" xml:space="preserve">
+    <value>Ďϋφľіčάтέ τàв !!! </value>
+  </data>
+  <data name="InvalidMediaResource" xml:space="preserve">
+    <value>Ωňę бг mθгě яėŝǿüґсėş (šυćн âş icon ōя backgroundImage) ŝрěçìƒįєð ίπ ýőūŕ ŝėтťīлġš ċòŭĺð йöŧ вέ ƒòúпď. !!! !!! !!! !!! !!! !!! !!! !!! !!! !!! </value>
+    <comment>{Locked="icon","backgroundImage"} Indicates that something has gone wrong while reading a user's settings.</comment>
+  </data>
+  <data name="AtLeastOneKeybindingWarning" xml:space="preserve">
+    <value>Щαѓńΐňģš ώĕřе ƒбŭπδ ώħīļë рăяşìⁿġ ўσυŕ κёỳвĩиðīήġş: !!! !!! !!! !!! !!!</value>
+  </data>
+  <data name="TooManyKeysForChord" xml:space="preserve">
+    <value>• ₣бūήð â ķёуьĩńðīⁿģ шĩŧђ τõб mªńÿ ѕťгίńġŝ ƒóř ţћ℮ "keys" åѓгàÿ. Тħėгē ѕĥōμĺđ бñľў вĕ ŏи℮ ѕтřïлģ νăŀůé ĭŉ ţĥė "keys" άřřàγ. !!! !!! !!! !!! !!! !!! !!! !!! !!! !!! !!! !!! </value>
+    <comment>{Locked="\"keys\"","•"} This glyph is a bullet, used in a bulleted list.</comment>
+  </data>
+  <data name="FailedToParseSubCommands" xml:space="preserve">
+    <value>• ₣ąìļ℮đ ţŏ ρǻŕşε âłľ śцъċőммåиðѕ ōƒ л℮śť℮ď сömmąπđ. !!! !!! !!! !!! !!! </value>
+  </data>
+  <data name="MissingRequiredParameter" xml:space="preserve">
+    <value>• ₣оůñð ā κėуьίπðîηĝ тħаŧ ẃáś мįѕśϊňģ д ѓ℮qûιŗзð рαřǻмęţεř νăľυë. Тнίѕ кεγьĩņđíņģ щìľļ вє įĝлóяеđ. !!! !!! !!! !!! !!! !!! !!! !!! !!! !!</value>
+    <comment>{Locked="•"} This glyph is a bullet, used in a bulleted list.</comment>
+  </data>
+  <data name="UnknownTheme" xml:space="preserve">
+    <value>• Тћë ѕрèçїƒĭёď "τћ℮мé" ώαѕ ήøţ ƒόûπđ ΐл ťћê ℓíŝť σƒ ťнεmέѕ. Ŧěмрǿŕдѓΐļγ ƒдℓłίńģ вà¢ĸ τő ŧнě đέƒαùŀŧ νǻľΰê. !!! !!! !!! !!! !!! !!! !!! !!! !!! !!! !!</value>
+    <comment>{Locked="•"} This glyph is a bullet, used in a bulleted list.</comment>
+  </data>
+  <data name="FailedToParseCommandJson" xml:space="preserve">
+    <value>₣ăіľέđ ţö ехρåņď ǻ çǿммãηδ ẃìţĥ "iterateOn" şετ. Ťĥīš ćōmмåиď щΐℓĺ ве ĭģňóѓëđ. !!! !!! !!! !!! !!! !!! !!! !!</value>
+    <comment>{Locked="\"iterateOn\""} </comment>
+  </data>
+  <data name="InvalidColorSchemeInCmd" xml:space="preserve">
+    <value>₣óŭйď ã сóмmаńδ ẁϊţђ дή îⁿναļīð "colorScheme". Тћîŝ ĉǿмmαήδ ωïĺĺ вε íğлŏгëð. Мâķэ ѕϋŗê τĥāţ ẅћэй šěτťîņġ å "colorScheme", ţĥé νаļΰé мªŧçћєѕ ţħє "name" őƒ ă ¢ôℓôř ŝςђзмê įň тнε "schemes" ľïşŧ. !!! !!! !!! !!! !!! !!! !!! !!! !!! !!! !!! !!! !!! !!! !!! !!! !!! !!! !!!</value>
+    <comment>{Locked="\"colorScheme\"","\"name\"","\"schemes\""}</comment>
+  </data>
+  <data name="InvalidSplitSize" xml:space="preserve">
+    <value>₣ŏΰπđ ā "splitPane" ¢ǿммäήđ ŵìтћ ăη îŋνąłιđ "size". Ţђíѕ ċǿммªпđ ŵīĺℓ ьė ìĝñōгёđ. Мăќέ šύгз τĥě śιźê įѕ ъèτшέëπ 0 äⁿð 1, εхčļûŝίνз. !!! !!! !!! !!! !!! !!! !!! !!! !!! !!! !!! !!! !!!</value>
+    <comment>{Locked="\"splitPane\"","\"size\""}</comment>
+  </data>
+  <data name="FailedToParseStartupActions" xml:space="preserve">
+    <value>₣âìľęď ťǿ рαяŝé "startupActions". !!! !!! !!! </value>
+    <comment>{Locked="\"startupActions\""}</comment>
+  </data>
+  <data name="InvalidProfileEnvironmentVariables" xml:space="preserve">
+    <value>₣öųñđ múℓтĭφļę èⁿνіŕθлмėňţ ναřίдъľêѕ ẅïτħ ťħз śăмė ήámе їή đїƒƒέřέηт čãşзś (ĺóщěг/ůрρеŕ) - óлℓŷ οиę νǻľµě ẁιľľ вё ųşέď. !!! !!! !!! !!! !!! !!! !!! !!! !!! !!! !!! !!!</value>
+  </data>
+  <data name="CmdCommandArgDesc" xml:space="preserve">
+    <value>Åŉ ǿртíоñαŀ ċοmмäηď, ẁίŧћ ãŗĝūměŉтş, ţô вέ šρªẃйèđ įņ ťђė πεẁ ŧав ŏŗ рªņε !!! !!! !!! !!! !!! !!! !!! </value>
+  </data>
+  <data name="SaveSnippetDesc" xml:space="preserve">
+    <value>Ѕäνê ςòmмàπδ ĺіⁿę åѕ ΐирμŧ άстĭŏñ !!! !!! !!! </value>
+  </data>
+  <data name="SaveSnippetArgDesc" xml:space="preserve">
+    <value>Ǻή òφťΐόπăℓ άѓğŭm℮иţ !!! !!!</value>
+  </data>
+  <data name="KeyChordArgDesc" xml:space="preserve">
+    <value>Åň øρτīõŉдŀ àŗġųm℮иť !!! !!!</value>
+  </data>
+  <data name="CmdFocusTabDesc" xml:space="preserve">
+    <value>Μòνê ƒöčµѕ ŧθ ãņøτнёř τåъ !!! !!! !</value>
+  </data>
+  <data name="CmdFocusTabNextArgDesc" xml:space="preserve">
+    <value>Мõνè ƒòćüŝ τθ ťћé пĕ×т ťαъ !!! !!! !</value>
+  </data>
+  <data name="CmdFTDesc" xml:space="preserve">
+    <value>Дŋ äℓĭάş ƒоř τћę "focus-tab" šųъčǿммáñđ. !!! !!! !!! !!!</value>
+    <comment>{Locked="\"focus-tab\""}</comment>
+  </data>
+  <data name="CmdFocusTabPrevArgDesc" xml:space="preserve">
+    <value>Μöνє ƒоćüŝ ŧó ţĥë рřěνĩομѕ тãь !!! !!! !!!</value>
+  </data>
+  <data name="CmdFocusTabTargetArgDesc" xml:space="preserve">
+    <value>Мονé ƒоćűŝ ťħέ τåь àτ ţĥé ĝįνèň іňďėж !!! !!! !!! !!</value>
+  </data>
+  <data name="CmdMovePaneTabArgDesc" xml:space="preserve">
+    <value>Μόνě ƒôçџś℮ď φąπέ τŏ ţħĕ ŧäв ǻτ тћė ģΐνеņ ĭñðěх !!! !!! !!! !!! !!</value>
+  </data>
+  <data name="CmdMovePaneDesc" xml:space="preserve">
+    <value>Μǿνê ƒõćυѕěð φâή℮ ťθ ǻлοτĥёŗ τąв !!! !!! !!! </value>
+  </data>
+  <data name="CmdMPDesc" xml:space="preserve">
+    <value>Ăⁿ āℓíąš ƒбŕ тнĕ "move-pane" šúъćбммàⁿδ. !!! !!! !!! !!!</value>
+    <comment>{Locked="\"move-pane\""}</comment>
+  </data>
+  <data name="CmdSplitPaneSizeArgDesc" xml:space="preserve">
+    <value>Ѕрёċϊƒÿ тђĕ ѕîžĕ αѕ ǻ ρēŕċêйτдģе őƒ ŧħě φǻґзйť φàņē. Vдℓίδ νǻŀùзş āŗε ьεтщ℮ёň (0,1), е×ςĺúŝινе. !!! !!! !!! !!! !!! !!! !!! !!! !!! !</value>
+  </data>
+  <data name="CmdNewTabDesc" xml:space="preserve">
+    <value>Çґέăťė ã πėш τáв !!! !</value>
+  </data>
+  <data name="CmdNTDesc" xml:space="preserve">
+    <value>Ăи άℓîªŝ ƒōř τħë "new-tab" śμвċόmмãŋδ. !!! !!! !!! !!</value>
+    <comment>{Locked="\"new-tab\""}</comment>
+  </data>
+  <data name="CmdFocusPaneDesc" xml:space="preserve">
+    <value>Μǿνé ƒосųŝ тô дπøţћєг рáņė !!! !!! !</value>
+  </data>
+  <data name="CmdFPDesc" xml:space="preserve">
+    <value>Áй áℓįãš ƒòŗ тђĕ "focus-pane" şυъĉöммàńđ. !!! !!! !!! !!!</value>
+    <comment>{Locked="\"focus-pane\""}</comment>
+  </data>
+  <data name="CmdFocusPaneTargetArgDesc" xml:space="preserve">
+    <value>₣ό¢űѕ тнê φàπĕ аţ тђè ğĭνėй ïŋðεж !!! !!! !!! </value>
+  </data>
+  <data name="CmdProfileArgDesc" xml:space="preserve">
+    <value>Θφêп шĩτћ ťнě ģìνēή ρѓøƒìĺę. Âćĉеφťś ёĩτĥėŗ τђė йάмє øя ĠŮΪÐ õƒ а φŕóƒίℓè !!! !!! !!! !!! !!! !!! !!! </value>
+  </data>
+  <data name="CmdSessionIdArgDesc" xml:space="preserve">
+    <value>Šέŧś ŧћэ ẀŦ_ŜÉŜŜІΟΝ νăяíåьłé; mµśτ вэ â ĢŨÎĐ !!! !!! !!! !!! !</value>
+  </data>
+  <data name="CmdSplitPaneDesc" xml:space="preserve">
+    <value>Ĉґéáŧе д ήэẅ ŝφĺĭτ рãňё !!! !!! </value>
+  </data>
+  <data name="CmdSPDesc" xml:space="preserve">
+    <value>Āл ªļïâś ƒбг ŧћê "split-pane" ŝύвćőммäňδ. !!! !!! !!! !!!</value>
+    <comment>{Locked="\"split-pane\""}</comment>
+  </data>
+  <data name="CmdSplitPaneHorizontalArgDesc" xml:space="preserve">
+    <value>Ċŕéάťё ťћè ⁿеẁ рâлè åś ǻ ħôŕîžőņτąŀ śρļίτ (ŧнїπĸ [-]) !!! !!! !!! !!! !!! </value>
+  </data>
+  <data name="CmdSplitPaneVerticalArgDesc" xml:space="preserve">
+    <value>Ċяěªтĕ ŧнέ ⁿèω ρаηе ªš ā νēѓτîčäŀ ѕрĺįť (тĥїπќ [|]) !!! !!! !!! !!! !!!</value>
+  </data>
+  <data name="CmdSplitPaneDuplicateArgDesc" xml:space="preserve">
+    <value>Ĉřεâте тħè пέẁ φаńè ъỳ ďцрłíçăţιηğ ťħе φгоƒíľз оƒ τĥě ƒőċūşëð рāиē !!! !!! !!! !!! !!! !!! !</value>
+  </data>
+  <data name="CmdStartingDirArgDesc" xml:space="preserve">
+    <value>Óрεŋ ιŋ τћē ĝіνèή ðіґėсťσŗý ΐńѕţêªđ ôƒ тħ℮ рřоƒĭľė'ŝ şĕŧ "startingDirectory" !!! !!! !!! !!! !!! !!! !!! !</value>
+    <comment>{Locked="\"startingDirectory\""}</comment>
+  </data>
+  <data name="CmdTitleArgDesc" xml:space="preserve">
+    <value>Òрèи ŧћ℮ тεгміņдľ шįтђ τћз рŕσνϊðэđ ţϊťľё їņšτèāď οƒ ŧħз рѓοƒïℓε'š śēт "title" !!! !!! !!! !!! !!! !!! !!! !!</value>
+    <comment>{Locked="\"title\""}</comment>
+  </data>
+  <data name="CmdTabColorArgDesc" xml:space="preserve">
+    <value>Фрєŋ τћę ťāь ẃĭŧĥ ŧĥē ѕρεçíƒĩĕď ċŏĺőŗ, ίŉ #řґģģьь ƒöřмàŧ !!! !!! !!! !!! !!! !</value>
+  </data>
+  <data name="CmdSuppressApplicationTitleDesc" xml:space="preserve">
+    <value>Όрзи тћê тäъ ŵîтн ŧãвŦìтŀέ øνėřѓĩδіиĝ δęƒåυĺŧ тīτłê ǻйď ѕűррŕ℮ѕśìήĝ τĭťℓé ċћаπġё mεśšàğзš ƒŗøм тћê ªрρĺĩčªτĭóņ !!! !!! !!! !!! !!! !!! !!! !!! !!! !!! !!!</value>
+    <comment>{Locked="\"tabTitle\""}</comment>
+  </data>
+  <data name="CmdInheritEnvDesc" xml:space="preserve">
+    <value>İηĥегïт ţĥě ťεřmĭŉǻł'ŝ õώп εņνĩŕόňмěñť νāřĭáьŀĕś ώнēл ĉгėǻтΐŉġ ţħз πęш ţáь ŏŕ ρäη℮, ŗãŧħёř ťĥªή ¢řēäţіηĝ ǻ ƒŗėśћ èήνιгőŋм℮иť ьļο¢к. Тħїš ďęƒαüłŧŝ τõ ѕёţ ẅħēň ą "command" îş ρãśŝéđ.  !!! !!! !!! !!! !!! !!! !!! !!! !!! !!! !!! !!! !!! !!! !!! !!! !!! !!!</value>
+    <comment>{Locked="\"command\""}</comment>
+  </data>
+  <data name="CmdColorSchemeArgDesc" xml:space="preserve">
+    <value>Øρéη ŧĥē ŧаь щïţђ ţнё ѕрě¢ίƒĩеð ¢θℓôя şĉнем℮, īπѕτêåδ òƒ τĥё φřőƒĭľе'ŝ ѕ℮ť "colorScheme" !!! !!! !!! !!! !!! !!! !!! !!! !!</value>
+    <comment>{Locked="\"colorScheme\""}</comment>
+  </data>
+  <data name="CmdVersionDesc" xml:space="preserve">
+    <value>Ďìśрℓàÿ тћē åφφłîςдťίøп νēřšįóń !!! !!! !!!</value>
+  </data>
+  <data name="CmdMaximizedDesc" xml:space="preserve">
+    <value>Ļáūńçн тћё ẅïиďоŵ мåжімĩźęð !!! !!! !!</value>
+  </data>
+  <data name="CmdFullscreenDesc" xml:space="preserve">
+    <value>£âµńĉн тнė щίπđощ їŉ ƒûℓŀşċŕėēη мøđè !!! !!! !!! !</value>
+  </data>
+  <data name="CmdMoveFocusDesc" xml:space="preserve">
+    <value>Мονë ƒόçцŝ τô ţнε дďјαçéŉţ φáπέ ίņ τнë ѕрéςĩƒїĕδ δіŗéćťïőп !!! !!! !!! !!! !!! !!</value>
+  </data>
+  <data name="CmdMFDesc" xml:space="preserve">
+    <value>Åп âℓιāś ƒóř ŧђз "move-focus" šůъçόмmàпð. !!! !!! !!! !!!</value>
+    <comment>{Locked="\"move-focus\""}</comment>
+  </data>
+  <data name="CmdMoveFocusDirectionArgDesc" xml:space="preserve">
+    <value>Тнê đιřèсţïöп ţό мøνĕ ƒŏčúś ìή !!! !!! !!!</value>
+  </data>
+  <data name="CmdSwapPaneDesc" xml:space="preserve">
+    <value>Šшдφ ťĥė ƒоčùšěď рдйê ŵīťђ ŧнё ãđĵă¢èņτ φåиé íŋ ťĥē šρêςīƒĭзδ đìѓз¢ţįőñ !!! !!! !!! !!! !!! !!! !!!</value>
+  </data>
+  <data name="CmdSwapPaneDirectionArgDesc" xml:space="preserve">
+    <value>Тнě διяèċτîõη ţό mōνе ťћë ƒòčϋš℮δ рαπ℮ īп !!! !!! !!! !!!</value>
+  </data>
+  <data name="CmdFocusDesc" xml:space="preserve">
+    <value>Ľãūлçĥ тħέ щíиδσώ ìй ƒô¢ũš мôďз !!! !!! !!!</value>
+  </data>
+  <data name="CmdSavedLayoutArgDesc" xml:space="preserve">
+    <value>Ŧћїѕ ρąяáмėŧєѓ ĭş āη їňтεŕήåŀ íмφĺêmёņťдţïòπ ďёŧåĩļ дηð šнŏųļδ ñōţ ьë ųšėð. !!! !!! !!! !!! !!! !!! !!! !</value>
+  </data>
+  <data name="CmdWindowTargetArgDesc" xml:space="preserve">
+    <value>Šрêςĩƒγ а ťĕгmìŋаł ẁϊпðõω τσ ґύŋ τнз ģίνĕи ĉömмαпđľįŉе їй. "0" āℓώąŷš řеƒěŗş ťσ ŧħė çŭґřęπť ẁįŉđǿω.  !!! !!! !!! !!! !!! !!! !!! !!! !!! !!!</value>
+  </data>
+  <data name="CmdPositionDesc" xml:space="preserve">
+    <value>Šрëĉίƒў тћε рόŝíŧιòή ƒōя тнě тėřmįηдŀ, ϊп "х,ÿ" ƒθřмάŧ. !!! !!! !!! !!! !!! !</value>
+  </data>
+  <data name="CmdSizeDesc" xml:space="preserve">
+    <value>Ѕφёĉĩƒỳ тнэ ņµmъ℮ґ øƒ ςòļůmйś ăŋð гøшş ƒöŕ тнε τєѓмϊⁿãŀ, ĩŉ "ċ,ř" ƒθяmãţ. !!! !!! !!! !!! !!! !!! !!! </value>
+  </data>
+  <data name="NewTabSplitButton.[using:Windows.UI.Xaml.Automation]AutomationProperties.HelpText" xml:space="preserve">
+    <value>Рґзѕś тђз вůťŧôй ŧǿ ǿφеη ā ŉéẃ ţєѓmîńąŀ ťâв ωϊŧђ ýθůř đęƒăμℓţ ρŗôƒїĺε. Óρĕп τћё ƒłýбцť ţø śεŀèςŧ шĥïčĥ φřŏƒίļê ўσμ ẁάлτ ţσ όрεй. !!! !!! !!! !!! !!! !!! !!! !!! !!! !!! !!! !!! !!</value>
+  </data>
+  <data name="NewTabSplitButton.[using:Windows.UI.Xaml.Automation]AutomationProperties.Name" xml:space="preserve">
+    <value>Ňèώ Ŧäъ !!</value>
+  </data>
+  <data name="NewTabRun.Text" xml:space="preserve">
+    <value>Όрèπ ª йěŵ ταв !!! !</value>
+  </data>
+  <data name="NewPaneRun.Text" xml:space="preserve">
+    <value>Ǻℓт+Сłĩċк тö šрŀîţ ţћë сцřѓèήŧ ẅїпðбω !!! !!! !!! !!</value>
+  </data>
+  <data name="NewWindowRun.Text" xml:space="preserve">
+    <value>Śħîƒť+Çľιćĸ тō όрзⁿ ª йзώ ẁίπðôш !!! !!! !!! </value>
+  </data>
+  <data name="ElevatedRun.Text" xml:space="preserve">
+    <value>€ţŕł+Čℓїčķ τõ ορêņ αŝ аðmìñĩѕτŕăţòг !!! !!! !!! !</value>
+  </data>
+  <data name="WindowCloseButton.[using:Windows.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
+    <value>Ĉļøşз !</value>
+  </data>
+  <data name="WindowCloseButtonToolTip.Text" xml:space="preserve">
+    <value>Ĉļόѕě !</value>
+  </data>
+  <data name="WindowMinimizeButton.[using:Windows.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
+    <value>Μîⁿĩmĩż℮ !!</value>
+  </data>
+  <data name="WindowMinimizeButtonToolTip.Text" xml:space="preserve">
+    <value>Мĩиîmĩżє !!</value>
+  </data>
+  <data name="AboutDialog.Title" xml:space="preserve">
+    <value>Åвōύţ !</value>
+  </data>
+  <data name="AboutDialog.PrimaryButtonText" xml:space="preserve">
+    <value>Ѕеηð ƒę℮đвäçк !!! </value>
+  </data>
+  <data name="AboutDialog.CloseButtonText" xml:space="preserve">
+    <value>ΦΚ </value>
+  </data>
+  <data name="AboutDialog_VersionLabel.Text" xml:space="preserve">
+    <value>Véяšîõп: !!</value>
+    <comment>This is the heading for a version number label</comment>
+  </data>
+  <data name="AboutDialog_SourceCodeLink.Content" xml:space="preserve">
+    <value>Ѕοџŗсė ¢ŏđе !!!</value>
+    <comment>A hyperlink name for the Terminal's documentation</comment>
+  </data>
+  <data name="AboutDialog_DocumentationLink.Content" xml:space="preserve">
+    <value>Đŏĉµмěⁿтатïõñ !!! </value>
+    <comment>A hyperlink name for user documentation</comment>
+  </data>
+  <data name="AboutDialog_ReleaseNotesLink.Content" xml:space="preserve">
+    <value>Ŗеľ℮àşε πòτéš !!! </value>
+    <comment>A hyperlink name for the Terminal's release notes</comment>
+  </data>
+  <data name="AboutDialog_PrivacyPolicyLink.Content" xml:space="preserve">
+    <value>Ρґїνãсÿ ρöĺĩςỳ !!! !</value>
+    <comment>A hyperlink name for the Terminal's privacy policy</comment>
+  </data>
+  <data name="AboutDialog_ThirdPartyNoticesLink.Content" xml:space="preserve">
+    <value>Ţћĩřð-Ρářŧγ ñοŧīĉęŝ !!! !!!</value>
+    <comment>A hyperlink name for the Terminal's third-party notices</comment>
+  </data>
+  <data name="ConfirmCloseDialog_Cancel" xml:space="preserve">
+    <value>Ĉάйçэļ !</value>
+  </data>
+  <data name="ConfirmCloseDialog_CloseAllTitle" xml:space="preserve">
+    <value>Ďő убυ ẅåήт ţø ¢ľöѕē äľľ ẃιⁿðŏŵş? !!! !!! !!! </value>
+  </data>
+  <data name="ConfirmCloseDialog_CloseAllPrimary" xml:space="preserve">
+    <value>Ċľóѕε ªĺĺ !!!</value>
+  </data>
+  <data name="ConfirmCloseDialog_WindowTitle" xml:space="preserve">
+    <value>Ďō γőű шдπŧ ŧò ςłοѕз āĺℓ ţäьš? !!! !!! !!!</value>
+  </data>
+  <data name="ConfirmCloseDialog_WindowPrimary" xml:space="preserve">
+    <value>Ĉŀõśê āłĺ !!!</value>
+  </data>
+  <data name="ConfirmCloseDialog_TabTitle" xml:space="preserve">
+    <value>Đó уøυ ẅāńť тο çŀǿśę ŧĥíš τάъ? !!! !!! !!!</value>
+  </data>
+  <data name="ConfirmCloseDialog_TabPrimary" xml:space="preserve">
+    <value>Ċℓοѕē ţαъ !!!</value>
+  </data>
+  <data name="ConfirmCloseDialog_PaneTitle" xml:space="preserve">
+    <value>Đò γθũ ώăńт ťǿ ¢ℓσŝę ŧħîŝ ρаńе? !!! !!! !!!</value>
+  </data>
+  <data name="ConfirmCloseDialog_PanePrimary" xml:space="preserve">
+    <value>Ĉŀбśз φдŋё !!!</value>
+  </data>
+  <data name="ConfirmCloseDialog_MultipleTabsTitle" xml:space="preserve">
+    <value>Đó ўоú ŵąňτ ŧò çŀσѕė ŧћěśé ţдьş? !!! !!! !!! </value>
+  </data>
+  <data name="ConfirmCloseDialog_MultipleTabsPrimary" xml:space="preserve">
+    <value>Ćŀöśé ŧãвś !!!</value>
+  </data>
+  <data name="ConfirmCloseDialog_MultiplePanesTitle" xml:space="preserve">
+    <value>Ðǿ ỳбū ŵáήť ŧо ćļόśě τнέšê φăñєš? !!! !!! !!! </value>
+  </data>
+  <data name="ConfirmCloseDialog_MultiplePanesPrimary" xml:space="preserve">
+    <value>€łǿśē рāⁿęѕ !!!</value>
+  </data>
+  <data name="DontAskAgainCheckBox.Content" xml:space="preserve">
+    <value>Đòñ'ť ªѕķ мë àĝáîⁿ !!! !!</value>
+  </data>
+  <data name="CloseReadOnlyDialog.CloseButtonText" xml:space="preserve">
+    <value>Čǻñčėŀ !</value>
+  </data>
+  <data name="CloseReadOnlyDialog.PrimaryButtonText" xml:space="preserve">
+    <value>Сłŏѕε άñÿẃåγ !!! </value>
+  </data>
+  <data name="CloseReadOnlyDialog.Title" xml:space="preserve">
+    <value>Ẁαгйïņğ !!</value>
+  </data>
+  <data name="CloseReadOnlyDialog.Content" xml:space="preserve">
+    <value>Ϋôů ářє дъоϋť ŧо ćľōśέ ª гęаð-öйĺу тêřmĩńäĺ. Đǿ ỳøü ωîśђ ŧő ćőŉţїñϋέ? !!! !!! !!! !!! !!! !!! !!!</value>
+  </data>
+  <data name="LargePasteDialog.CloseButtonText" xml:space="preserve">
+    <value>Сâήçеŀ !</value>
+  </data>
+  <data name="LargePasteDialog.Content" xml:space="preserve">
+    <value>Ўōµ ąřε ăвőüť ţò ρãѕŧĕ ťê×ŧ тħãт ïš ľôŉğзŗ ŧђąи 5 ЌΐБ. Đθ γŏΰ ẅĩşħ τò ςõиŧĭňūê? !!! !!! !!! !!! !!! !!! !!! !!!</value>
+  </data>
+  <data name="LargePasteDialog.PrimaryButtonText" xml:space="preserve">
+    <value>Ρâşτз ăπуẅаý !!! </value>
+  </data>
+  <data name="LargePasteDialog.Title" xml:space="preserve">
+    <value>Ẃâгηïņğ !!</value>
+  </data>
+  <data name="MultiLinePasteDialog.CloseButtonText" xml:space="preserve">
+    <value>Ćªήĉěł !</value>
+  </data>
+  <data name="MultiLineWarningText.Text" xml:space="preserve">
+    <value>Ϋбů áяē авôцţ τŏ ρªѕŧê ťĕхţ ťĥâť ĉοлŧäїлš mųŀťїрŀē ĺΐиέš. Ĭƒ ýŏû рαśτё ťђìš ť℮хŧ îήŧø γõũŗ ѕћêℓļ, íτ mду ŗéśμļт įŋ ţħ℮ цпęхρ℮çťêď з×эćúтϊŏⁿ õƒ ςōмmãⁿðş. Đο убŭ ẃīѕн τõ ċôŉŧïñûε? !!! !!! !!! !!! !!! !!! !!! !!! !!! !!! !!! !!! !!! !!! !!! !!! !!! !!</value>
+  </data>
+  <data name="MultiLinePasteDialog.PrimaryButtonText" xml:space="preserve">
+    <value>Ρªšţє аńŷẁàŷ !!! </value>
+  </data>
+  <data name="MultiLinePasteDialog.Title" xml:space="preserve">
+    <value>Щāŕñιπĝ !!</value>
+  </data>
+  <data name="CommandPalette_SearchBox.PlaceholderText" xml:space="preserve">
+    <value>Ťýφě á ĉθmmāņđ йăмē... !!! !!! </value>
+  </data>
+  <data name="CommandPalette_NoMatchesText.Text" xml:space="preserve">
+    <value>Ŋό маŧ¢ĥΐŋğ сóмmăлđš !!! !!!</value>
+  </data>
+  <data name="CommandPaletteModeAnnouncement_ActionMode" xml:space="preserve">
+    <value>∆ćŧìøп şєāяćħ мóδє !!! !!</value>
+    <comment>This text will be read aloud using assistive technologies when the command palette switches into action (command search) mode.</comment>
+  </data>
+  <data name="CommandPaletteModeAnnouncement_TabSearchSwitchMode" xml:space="preserve">
+    <value>Тàв ťїтłé môðэ !!! !</value>
+    <comment>This text will be read aloud using assistive technologies when the command palette switches into a mode that filters tab names.</comment>
+  </data>
+  <data name="CommandPaletteModeAnnouncement_CommandlineMode" xml:space="preserve">
+    <value>Çοmмăπď-ĺιиé мõđэ !!! !!</value>
+    <comment>This text will be read aloud using assistive technologies when the command palette switches into the raw commandline parsing mode.</comment>
+  </data>
+  <data name="CommandPalette_NestedCommandAnnouncement" xml:space="preserve">
+    <value>Μояē öφтίóπś ƒőř "{}" !!! !!!</value>
+    <comment>This text will be read aloud using assistive technologies when the user selects a command that has additional options. The {} will be expanded to the name of the command containing more options.</comment>
+  </data>
+  <data name="CommandPalette_ParsedCommandLine" xml:space="preserve">
+    <value>Ėжėсùţīпğ ¢ōmмªñð ĺїπĕ ẁíĺł ĭиνокė тħе ƒöĺℓŏщîпġ çõmмāⁿďѕ: !!! !!! !!! !!! !!! !!</value>
+    <comment>Will be followed by a list of strings describing parsed commands</comment>
+  </data>
+  <data name="CommandPalette_FailedParsingCommandLine" xml:space="preserve">
+    <value>₣āіľ℮ď рàгśīпģ ¢бммäⁿδ ĺīñè: !!! !!! !!</value>
+  </data>
+  <data name="CommandPaletteControlName" xml:space="preserve">
+    <value>Ćσmmăηδ ράŀĕтţ℮ !!! !</value>
+  </data>
+  <data name="TabSwitcherControlName" xml:space="preserve">
+    <value>Τăь ѕωîťςћêг !!! </value>
+  </data>
+  <data name="TabSwitcher_SearchBoxText" xml:space="preserve">
+    <value>Ţýρё ă тăъ пâmě... !!! !!</value>
+  </data>
+  <data name="TabSwitcher_NoMatchesText" xml:space="preserve">
+    <value>Ńô мατćнìņģ ţдъ пªмĕ !!! !!!</value>
+  </data>
+  <data name="CmdPalCommandlinePrompt" xml:space="preserve">
+    <value>Èηŧĕґ ǻ wt ċθmмаŉđļïŉė тο ŕūŉ !!! !!! !!!</value>
+    <comment>{Locked="wt"} </comment>
+  </data>
+  <data name="SuggestionsControl_NestedCommandAnnouncement" xml:space="preserve">
+    <value>Μōŗè σφŧïθлš ƒόŕ "{}" !!! !!!</value>
+    <comment>This text will be read aloud using assistive technologies when the user selects a command that has additional options. The {} will be expanded to the name of the command containing more options.</comment>
+  </data>
+  <data name="SuggestionsControl_SearchBox.PlaceholderText" xml:space="preserve">
+    <value>Ťÿφė å ċοmмªйđ ηаmє... !!! !!! </value>
+  </data>
+  <data name="SuggestionsControl_NoMatchesText.Text" xml:space="preserve">
+    <value>Ņô mάťςћίņĝ ċоmмάņďš !!! !!!</value>
+  </data>
+  <data name="SuggestionsControlName" xml:space="preserve">
+    <value>Šύğġěşţįσпś м℮ŉμ !!! !</value>
+  </data>
+  <data name="SuggestionsControl_MoreOptions.[using:Windows.UI.Xaml.Automation]AutomationProperties.HelpText" xml:space="preserve">
+    <value>Мόѓė ōφťіŏⁿś !!! </value>
+  </data>
+  <data name="SuggestionsControl_MatchesAvailable" xml:space="preserve">
+    <value>Śΰġģ℮šτϊθñѕ ƒöüⁿδ: {0} !!! !!! </value>
+    <comment>{0} will be replaced with a number.</comment>
+  </data>
+  <data name="CrimsonColorButton.[using:Windows.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
+    <value>€яïmşǿń !!</value>
+  </data>
+  <data name="SteelBlueColorButton.[using:Windows.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
+    <value>Ѕťéêℓ βľυэ !!!</value>
+  </data>
+  <data name="MediumSeaGreenColorButton.[using:Windows.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
+    <value>Μёδιųm Ѕεд Ğґзēη !!! !</value>
+  </data>
+  <data name="DarkOrangeColorButton.[using:Windows.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
+    <value>Ďäŕќ Õřäňğè !!!</value>
+  </data>
+  <data name="MediumVioletRedColorButton.[using:Windows.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
+    <value>Мęðϊům Vĭõľзт Ѓεð !!! !!</value>
+  </data>
+  <data name="DodgerBlueColorButton.[using:Windows.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
+    <value>Ðôđğēг Βĺϋę !!!</value>
+  </data>
+  <data name="LimeGreenColorButton.[using:Windows.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
+    <value>Ĺіmз Ĝґéĕи !!!</value>
+  </data>
+  <data name="YellowColorButton.[using:Windows.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
+    <value>¥ęℓłοẃ !</value>
+  </data>
+  <data name="BlueVioletColorButton.[using:Windows.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
+    <value>Ьľùе Vΐбŀэτ !!!</value>
+  </data>
+  <data name="SlateBlueColorButton.[using:Windows.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
+    <value>Şŀаťę Βĺûė !!!</value>
+  </data>
+  <data name="LimeColorButton.[using:Windows.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
+    <value>£ϊмз !</value>
+  </data>
+  <data name="TanColorButton.[using:Windows.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
+    <value>Ťåπ </value>
+  </data>
+  <data name="MagentaColorButton.[using:Windows.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
+    <value>Μàğэⁿτα !!</value>
+  </data>
+  <data name="CyanColorButton.[using:Windows.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
+    <value>Ċуåň !</value>
+  </data>
+  <data name="SkyBlueColorButton.[using:Windows.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
+    <value>Šќŷ ßľϋ℮ !!</value>
+  </data>
+  <data name="DarkGrayColorButton.[using:Windows.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
+    <value>Ðàŗκ Ğѓáγ !!!</value>
+  </data>
+  <data name="InvalidUriText" xml:space="preserve">
+    <value>Τћїš ŀĩňк іѕ įňνдŀíď: !!! !!!</value>
+  </data>
+  <data name="UnsupportedSchemeText" xml:space="preserve">
+    <value>Ťђïś łϊηќ ŧурē ιş çũґѓзⁿτľÿ ñστ şΰρρоŕŧĕđ: !!! !!! !!! !!! </value>
+  </data>
+  <data name="UriErrorDialog.CloseButtonText" xml:space="preserve">
+    <value>Çдπсёľ !</value>
+  </data>
+  <data name="UnsafeUrlConfirmText" xml:space="preserve">
+    <value>Ŧђīś ℓîŋќ мαў ľêãδ τб áń úŉšàƒé ℓоćάŧίоñ. Ĥўрзŗℓĭŋķѕ çâⁿ ъέ ђąřмƒúļ τό ўôця ċómφύŧèґ аňδ ðáťǻ. Ţб ρгøťėçŧ ўòύг ςömφùţĕŕ, ŏŋľỳ čℓΐςķ łίŋκѕ ƒřöм ťŗμѕŧєđ śόυяčêś. !!! !!! !!! !!! !!! !!! !!! !!! !!! !!! !!! !!! !!! !!! !!! !!!</value>
+  </data>
+  <data name="UnsafeUrlConfirmAllowAction" xml:space="preserve">
+    <value>Őρέй ǻпŷŵãγ !!!</value>
+  </data>
+  <data name="SettingsTab" xml:space="preserve">
+    <value>Śëţťĩпğś !!</value>
+  </data>
+  <data name="FailedToWriteToSettings" xml:space="preserve">
+    <value>Ẃε ςőűℓđ пòт ωяΐτë ŧô γôύг šěťтïπĝŝ ƒīłě. Çђêĉĸ ţђэ φеřмìşŝΐóпѕ õл ťђàτ ƒĩŀε ţб έπšμґé ţђäť тћê ѓέάδ-õлļỳ ƒŀãġ ΐš ŉοт ŝėт ǻпď ţнăт ẅѓīţĕ ăсċéšş ĩş ģŗдŋτëđ. !!! !!! !!! !!! !!! !!! !!! !!! !!! !!! !!! !!! !!! !!! !!! !</value>
+  </data>
+  <data name="ParentCommandBackButton.[using:Windows.UI.Xaml.Automation]AutomationProperties.Name" xml:space="preserve">
+    <value>Бдçķ !</value>
+  </data>
+  <data name="ParentCommandBackButton.[using:Windows.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
+    <value>Ьãςк !</value>
+  </data>
+  <data name="ControlNoticeDialog.PrimaryButtonText" xml:space="preserve">
+    <value>ΘК </value>
+  </data>
+  <data name="NoticeDebug" xml:space="preserve">
+    <value>Ďêъŭģ !</value>
+  </data>
+  <data name="NoticeError" xml:space="preserve">
+    <value>∑ŕřοґ !</value>
+  </data>
+  <data name="NoticeInfo" xml:space="preserve">
+    <value>Īπƒóřмąτιŏŉ !!!</value>
+  </data>
+  <data name="NoticeWarning" xml:space="preserve">
+    <value>Шãřñїņģ !!</value>
+  </data>
+  <data name="ClipboardTextHeader.Text" xml:space="preserve">
+    <value>€ℓірьоåŗδ ĉóńťęňтѕ (φѓενĭεẃ): !!! !!! !!!</value>
+  </data>
+  <data name="CommandPalette_MoreOptions.[using:Windows.UI.Xaml.Automation]AutomationProperties.HelpText" xml:space="preserve">
+    <value>Мθґе бφŧīбπš !!! </value>
+  </data>
+  <data name="WindowIdLabel" xml:space="preserve">
+    <value>Ẅίńďöщ !</value>
+    <comment>This is displayed as a label for a number, like "Window: 10"</comment>
+  </data>
+  <data name="UnnamedWindowName" xml:space="preserve">
+    <value>υŉňàмěđ ẅіπďōẅ !!! !</value>
+    <comment>text used to identify when a window hasn't been assigned a name by the user</comment>
+  </data>
+  <data name="NameThisWindowMenuItem" xml:space="preserve">
+    <value>Ńªmè ťнĩš ώìńðőẃ... !!! !!!</value>
+    <comment>Menu item text shown when the current window has no name assigned</comment>
+  </data>
+  <data name="RenameThisWindowMenuItem" xml:space="preserve">
+    <value>Ŕеŋªмĕ тнįѕ шíŋďōщ... !!! !!!</value>
+    <comment>Menu item text shown when the current window already has a name</comment>
+  </data>
+  <data name="WindowListUnnamedEntry" xml:space="preserve">
+    <value>#{0} (цņŉàмėδ) !!! !</value>
+    <comment>{locked="{0}"}{0} is the window ID number. Shown in the workspace flyout for windows that have no name assigned.</comment>
+  </data>
+  <data name="DeleteWorkspaceMenuItem" xml:space="preserve">
+    <value>Ðеℓĕтэ ẁόŕķšφåςέ? !!! !!</value>
+    <comment>Menu item text shown in the right-click context menu on a saved workspace</comment>
+  </data>
+  <data name="OpenWorkspaceMenuItem" xml:space="preserve">
+    <value>Орεи ωоѓķšρдċè !!! !</value>
+    <comment>Menu item text for opening a saved workspace</comment>
+  </data>
+  <data name="ConfirmDeleteWorkspaceTitle" xml:space="preserve">
+    <value>Ďĕℓéţę "{0}"? !!! </value>
+    <comment>{locked="{0}"}{0} is the workspace name. Shown as the title of a confirmation dialog when the user tries to delete a saved workspace.</comment>
+  </data>
+  <data name="ConfirmDeleteWorkspaceBody" xml:space="preserve">
+    <value>Āŕę ÿоυ ŝűѓě ŷōū шąлŧ ŧό ðёłěŧё "{0}"? Ѕêşѕįŏпŝ άšѕǿĉіãťэδ ẁíτн тђíś шőґκѕρªĉэ щιłℓ ªĺśο ьэ ďэŀęтёδ. !!! !!! !!! !!! !!! !!! !!! !!! !!! !!!</value>
+    <comment>{locked="{0}"}{0} is the workspace name. Body text of the confirmation dialog shown when the user tries to delete a saved workspace.</comment>
+  </data>
+  <data name="ConfirmDeleteWorkspaceDelete" xml:space="preserve">
+    <value>Ďėŀéтэ !</value>
+    <comment>Primary button text on the delete workspace confirmation dialog</comment>
+  </data>
+  <data name="ConfirmDeleteWorkspaceCancel" xml:space="preserve">
+    <value>Сαńčēļ !</value>
+    <comment>Cancel button text on the delete workspace confirmation dialog</comment>
+  </data>
+  <data name="WindowRenamer.Subtitle" xml:space="preserve">
+    <value>Єиŧ℮ŗ ă ñéẁ йάmё: !!! !!</value>
+  </data>
+  <data name="WindowRenamer.ActionButtonContent" xml:space="preserve">
+    <value>ÒК </value>
+  </data>
+  <data name="WindowRenamer.CloseButtonContent" xml:space="preserve">
+    <value>Сªⁿċĕĺ !</value>
+  </data>
+  <data name="WindowMaximizeButtonToolTip" xml:space="preserve">
+    <value>Μą×ìmϊżé !!</value>
+  </data>
+  <data name="WindowRestoreDownButtonToolTip" xml:space="preserve">
+    <value>Ŕèšŧòяё ďǿẃи !!! </value>
+  </data>
+  <data name="CommandPaletteMenuItem" xml:space="preserve">
+    <value>Ċòмmāńδ рªľėτťë !!! !</value>
+  </data>
+  <data name="NotificationIconFocusTerminal" xml:space="preserve">
+    <value>₣ôćűŝ Ţеґмĭйâŀ !!! !</value>
+    <comment>This is displayed as a label for the context menu item that focuses the terminal.</comment>
+  </data>
+  <data name="NotificationIconWindowSubmenu" xml:space="preserve">
+    <value>Ẃϊйδοŵš !!</value>
+    <comment>This is displayed as a label for the context menu item that holds the submenu of available windows.</comment>
+  </data>
+  <data name="NotificationMessage_TabActivity" xml:space="preserve">
+    <value>Δćţíνïŧý īй τаь "{0}" !!! !!!</value>
+    <comment>{0} is the tab title. Shown as the body of a desktop notification when tab activity is detected.</comment>
+  </data>
+  <data name="NotificationMessage_TabActivityInWindow" xml:space="preserve">
+    <value>Δсŧìνιŧý įņ ţªь "{0}" (ŵϊņδόώ "{1}") !!! !!! !!! !</value>
+    <comment>{0} is the tab title, {1} is the window name. Shown as the body of a desktop notification when tab activity is detected and the window has a name.</comment>
+  </data>
+  <data name="DropPathTabRun.Text" xml:space="preserve">
+    <value>Фφĕń ª пёẅ ţâь ίи ğīνęņ ѕŧāятĩлğ δįŗęćтŏяγ !!! !!! !!! !!! </value>
+  </data>
+  <data name="DropPathTabNewWindow.Text" xml:space="preserve">
+    <value>Οφэй ä ŋёώ ẅįńðбώ ẁįτђ ĝĩνēη šτáгтϊŋĝ ðĭřěçŧøгγ !!! !!! !!! !!! !!</value>
+  </data>
+  <data name="DropPathTabSplit.Text" xml:space="preserve">
+    <value>Ŝρℓΐŧ ŧнė ẁίňďõŵ άпδ ŝţâґţ ίń ģįνëŉ δϊгέ¢ŧøяў !!! !!! !!! !!! !</value>
+  </data>
+  <data name="ExportTabText" xml:space="preserve">
+    <value>Ė×φōŗŧ ţєхŧ !!!</value>
+  </data>
+  <data name="FindText" xml:space="preserve">
+    <value>₣ìпđ !</value>
+  </data>
+  <data name="SwitchToHorizontalTabsText" xml:space="preserve">
+    <value>Ѕŵĭťċħ ťő ħőяĭžőñťªĺ ťªвѕ !!! !!!</value>
+  </data>
+  <data name="SwitchToHorizontalTabsToolTip" xml:space="preserve">
+    <value>Ūѕé ħőяĭžőñťªĺ ťªвѕ ĭñ ªĺĺ Ťéямĭñªĺ ŵĭñđőŵѕ !!! !!! !!! !!!</value>
+  </data>
+  <data name="SwitchToVerticalTabsText" xml:space="preserve">
+    <value>Ѕŵĭťċħ ťő ѕĭđéвªя !!!</value>
+    <comment>Context-menu command that changes the tab layout from horizontal tabs to the sidebar.</comment>
+  </data>
+  <data name="SwitchToVerticalTabsToolTip" xml:space="preserve">
+    <value>Ūѕé ťħé ѕĭđéвªя ĭñ ªĺĺ Ťéямĭñªĺ ŵĭñđőŵѕ !!! !!! !!! !!!</value>
+    <comment>Tooltip for the command that changes the tab layout from horizontal tabs to the sidebar in every Terminal window.</comment>
+  </data>
+  <data name="CloseOnExitInfoBar.Message" xml:space="preserve">
+    <value>Ťéямїлâŧîόň ь℮ћäνįőř čªή вĕ ċοñƒĩġџřèδ įŋ ăδνåл¢êð ряòƒιļє şėŧтіиĝś. !!! !!! !!! !!! !!! !!! !!</value>
+  </data>
+  <data name="InfoBarDismissButton.Content" xml:space="preserve">
+    <value>Ďόń'ţ šħόω ãĝάϊл !!! !</value>
+  </data>
+  <data name="ElevationShield.[using:Windows.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
+    <value>Ţђіś Тĕřмїηǻℓ шĩⁿðöŵ ïѕ ѓüñňĩñģ ãŝ áðmĭⁿîşŧŕãţθŕ !!! !!! !!! !!! !!</value>
+  </data>
+  <data name="WorkspaceDropdown.[using:Windows.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
+    <value>Ẃǿřķşрǻсєš !!!</value>
+  </data>
+  <data name="CommandPalette_MatchesAvailable" xml:space="preserve">
+    <value>Ѕũğġεšтįóпş ƒōцŉđ: {0} !!! !!! </value>
+    <comment>{0} will be replaced with a number.</comment>
+  </data>
+  <data name="AboutDialog_CheckingForUpdatesLabel.Text" xml:space="preserve">
+    <value>Çђęċќїŋğ ƒσř ũρδàτέѕ... !!! !!! </value>
+  </data>
+  <data name="AboutDialog_UpdateAvailableLabel.Text" xml:space="preserve">
+    <value>Δŉ μρđаŧè ĭś ăνăϊłªвľė. !!! !!! </value>
+  </data>
+  <data name="AboutDialog_InstallUpdateButton.Content" xml:space="preserve">
+    <value>Ϊŋśţāŀŀ πбẁ !!!</value>
+  </data>
+  <data name="DuplicateRemainingProfilesEntry" xml:space="preserve">
+    <value>Ŧђê "newTabMenu" ƒιêŀď čσñţąϊйѕ mōѓé ťђǻñ öŋė ёňτŕý őƒ τýρê "remainingProfiles". Οňŀŷ ŧĥє ƒїѓşť òⁿę ẃîłļ ве čоňşΐđ℮ґёδ. !!! !!! !!! !!! !!! !!! !!! !!! !!! !!! !!! !!!</value>
+    <comment>{Locked="newTabMenu"} {Locked="remainingProfiles"}</comment>
+  </data>
+  <data name="InvalidUseOfContent" xml:space="preserve">
+    <value>Ťђέ "__content" φŕόφέŕτγ íś řêšзřνеð ƒσř ійтėŕňåℓ ΰşè !!! !!! !!! !!! !!! </value>
+    <comment>{Locked="__content"}</comment>
+  </data>
+  <data name="AboutToolTip" xml:space="preserve">
+    <value>Фφèη а ðїаļθĝ ćбⁿťáĭηΐñģ ρřσđůčŧ ілƒǿřmãтĩöή !!! !!! !!! !!! !</value>
+  </data>
+  <data name="ChooseColorToolTip" xml:space="preserve">
+    <value>Ωφĕй ŧнė ¢óŀοŕ φĩċĸęř τσ ¢ђőōѕė ťħê сõľòŗ бƒ ŧħįѕ τªь !!! !!! !!! !!! !!! </value>
+  </data>
+  <data name="CommandPaletteToolTip" xml:space="preserve">
+    <value>Øρĕл ţће сǿmмåήđ ρãĺέτŧě !!! !!! !</value>
+  </data>
+  <data name="DuplicateTabToolTip" xml:space="preserve">
+    <value>Óρέл â ŉзш τàв ũśĭлġ ŧħё ąċŧîνê ρŕøƒΐĺé ĩи ţħě çúггзηт đĩřзçţøřý !!! !!! !!! !!! !!! !!! !</value>
+  </data>
+  <data name="ExportTabToolTip" xml:space="preserve">
+    <value>Ēхφõґт τĥе сǿήŧĕиŧѕ ōƒ τђė ťε×τ ъũƒƒεř ĩήŧо α ţé×ť ƒιļê !!! !!! !!! !!! !!! !</value>
+  </data>
+  <data name="FindToolTip" xml:space="preserve">
+    <value>Φρéņ ŧнĕ şęâřςћ ðíάŀŏģ !!! !!! </value>
+  </data>
+  <data name="RenameTabToolTip" xml:space="preserve">
+    <value>Ŗėлαмē тħíŝ тåв !!! !</value>
+  </data>
+  <data name="SettingsToolTip" xml:space="preserve">
+    <value>Òφĕņ тĥе šэτŧīлğš ρдģė !!! !!! </value>
+  </data>
+  <data name="SplitTabToolTip" xml:space="preserve">
+    <value>Ωрėŋ д πėẁ φâиě űѕīⁿģ тĥэ ã¢τίνë рřŏƒίĺê îŋ ţћэ çūŗгěηт ďíř℮ĉŧõгỳ !!! !!! !!! !!! !!! !!! !</value>
+  </data>
+  <data name="TabCloseAfterToolTip" xml:space="preserve">
+    <value>Сłǿśе ǻĺľ τăвś ţô ŧн℮ яîĝħť őƒ τђїş тάв !!! !!! !!! !!!</value>
+  </data>
+  <data name="TabCloseBelowToolTip" xml:space="preserve">
+    <value>Ċĺőѕé ªĺĺ ťªвѕ вéĺőŵ ťħĭѕ ťªв !!! !!! !!!</value>
+  </data>
+  <data name="TabCloseOtherToolTip" xml:space="preserve">
+    <value>€ļόѕĕ ªŀŀ ŧáвѕ έ×ćèρт ŧнìş ŧåв !!! !!! !!!</value>
+  </data>
+  <data name="TabCloseToolTip" xml:space="preserve">
+    <value>Ĉłоśэ ťĥìŝ ţªъ !!! !</value>
+  </data>
+  <data name="NewTabMenuFolderEmpty" xml:space="preserve">
+    <value>Ёмφţγ !</value>
+  </data>
+  <data name="ClosePaneText" xml:space="preserve">
+    <value>Ĉĺοŝе φаиę !!!</value>
+  </data>
+  <data name="ClosePaneToolTip" xml:space="preserve">
+    <value>Çĺόś℮ τнĕ ă¢τίν℮ рáлĕ ιƒ mϋŀţїрĺë φàńęś άŗє рřęšеńт !!! !!! !!! !!! !!!</value>
+  </data>
+  <data name="TabColorClearButton.[using:Windows.UI.Xaml.Automation]AutomationProperties.FullDescription" xml:space="preserve">
+    <value>Ґέšεт τăъ ċǿℓőґ !!! !</value>
+    <comment>Text used to identify the reset button</comment>
+  </data>
+  <data name="MoveTabToNewWindowText" xml:space="preserve">
+    <value>Мόνз ţǻь ŧö ŉ℮ω ώĭŋδōώ !!! !!! </value>
+  </data>
+  <data name="MoveTabToNewWindowToolTip" xml:space="preserve">
+    <value>Мøνëŝ ŧªъ ŧǿ ã пεẃ шίŋđоẁ  !!! !!! !</value>
+  </data>
+  <data name="RunAsAdminFlyout.Text" xml:space="preserve">
+    <value>Ŕμŋ ąś åďmįиíšťґąţőя !!! !!!</value>
+    <comment>This text is displayed on context menu for profile entries in add new tab button.</comment>
+  </data>
+  <data name="TerminalPage_PaneMovedAnnouncement_ExistingTab" xml:space="preserve">
+    <value>∆çťíνĕ рåⁿэ мôνеð ťб "{0}" ţав !!! !!! !!!</value>
+    <comment>{Locked="{0}"}This text is read out by screen readers upon a successful pane movement. {0} is the name of the tab to which the pane was moved.</comment>
+  </data>
+  <data name="TerminalPage_TabMovedAnnouncement_Default" xml:space="preserve">
+    <value>"{0}" ťāъ мōνęđ τŏ "{1}" шΐπδŏẅ !!! !!! !!!</value>
+    <comment>{Locked="{0}"}{Locked="{1}"}This text is read out by screen readers upon a successful tab movement. {0} is the name of the tab. {1} is the name of the window to which the tab was moved.</comment>
+  </data>
+  <data name="TerminalPage_TabMovedAnnouncement_NewWindow" xml:space="preserve">
+    <value>"{0}" тąь mǿνєđ ŧσ ήèώ ẅĩŋďøẃ !!! !!! !!!</value>
+    <comment>{Locked="{0}"}This text is read out by screen readers upon a successful tab movement. {0} is the name of the tab.</comment>
+  </data>
+  <data name="TerminalPage_TabMovedAnnouncement_Direction" xml:space="preserve">
+    <value>"{0}" ŧαв мονĕđ το φóŝїŧíŏñ "{1}" !!! !!! !!! </value>
+    <comment>{Locked="{0}"}{Locked="{1}"}This text is read out by screen readers upon a successful tab movement. {0} is the name of the tab. {1} is the new tab index in the tab row.</comment>
+  </data>
+  <data name="TerminalPage_PaneMovedAnnouncement_ExistingWindow2" xml:space="preserve">
+    <value>Λςťìνє рáиė mόνéð ťб "{0}" ŵîńđθω !!! !!! !!! </value>
+    <comment>{Locked="{0}"}This text is read out by screen readers upon a successful pane movement. {0} is the name of the window to which the pane was moved.</comment>
+  </data>
+  <data name="TerminalPage_PaneMovedAnnouncement_NewWindow" xml:space="preserve">
+    <value>Αĉťįνέ ρªņз mσνёđ τǿ ήёẃ ẃîпďǿω !!! !!! !!!</value>
+    <comment>This text is read out by screen readers upon a successful pane movement to a new window.</comment>
+  </data>
+  <data name="TerminalPage_PaneMovedAnnouncement_NewTab" xml:space="preserve">
+    <value>Дсţϊνё φαŋє mбν℮ð ťŏ ηеẁ ταв !!! !!! !!</value>
+    <comment>This text is read out by screen readers upon a successful pane movement to a new tab within the existing window.</comment>
+  </data>
+  <data name="CmdAppendCommandLineDesc" xml:space="preserve">
+    <value>Ĩƒ šęţ, ŧнĕ ¢ömmдлδ ŵîĺł ьέ åφрєйδĕđ τσ ŧђė рřŏƒїłє'ş đзƒªūľţ ¢οmмăńδ іñѕţέáđ øƒ ѓēρļąċĭлĝ їţ. !!! !!! !!! !!! !!! !!! !!! !!! !!! !</value>
+  </data>
+  <data name="RestartConnectionText" xml:space="preserve">
+    <value>Γēѕŧâяŧ ŝєѕѕïσⁿ !!! !</value>
+  </data>
+  <data name="RestartConnectionToolTip" xml:space="preserve">
+    <value>Γėşťáгţ ŧħ℮ ŝёšŝīőń įй τђ℮ ăċţΐνе φǻñē !!! !!! !!! !!</value>
+  </data>
+  <data name="SnippetPaneTitle.Text" xml:space="preserve">
+    <value>Šņíрρēťş !!</value>
+    <comment>Header for a page that includes small "snippets" of text for the user to enter</comment>
+  </data>
+  <data name="SnippetsFilterBox.PlaceholderText" xml:space="preserve">
+    <value>₣ΐℓŧєя ѕηīφρеτš... !!! !!</value>
+    <comment>Placeholder text for a text box to filter snippets (on the same page as the 'SnippetPaneTitle')</comment>
+  </data>
+  <data name="SnippetPlayButton.[using:Windows.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
+    <value>İňрūţ τнïš çõmmàηδ !!! !!</value>
+  </data>
+  <data name="SnippetPlayButton.[using:Windows.UI.Xaml.Automation]AutomationProperties.Name" xml:space="preserve">
+    <value>Їńрúτ ťħΐš ċómmãηδ !!! !!</value>
+  </data>
+  <data name="SnippetsPaneNoneFoundHeader.Text" xml:space="preserve">
+    <value>Йό ŝŋιφρетѕ ƒόµиð їή γούг šэťτιņģѕ. !!! !!! !!! !</value>
+    <comment>Text shown to user when no snippets are found in their settings</comment>
+  </data>
+  <data name="SnippetsPaneNoneFoundDetails.Text" xml:space="preserve">
+    <value>Аðđ ѕоm℮ "Śзήδ ĩпρύŧ" ãćŧϊǿŋś їп ýоϋŕ šéτтīñġѕ ţŏ ћăνė ţнέm ŝђǿŵ ûρ нęŕè. !!! !!! !!! !!! !!! !!! !!! </value>
+    <comment>Additional information presented to the user to let them know they can add a "Send input" action in their setting to populate the snippets pane</comment>
+  </data>
+  <data name="ActionSavedToast.Title" xml:space="preserve">
+    <value>Α¢τΐόń ŝâνеð !!! </value>
+  </data>
+  <data name="ActionSaveFailedToast.Title" xml:space="preserve">
+    <value>Аčτĩóň ѕáνē ƒªĩłęδ !!! !!</value>
+  </data>
+  <data name="CloseSnippetsPaneButton.[using:Windows.UI.Xaml.Automation]AutomationProperties.Name" xml:space="preserve">
+    <value>Сłöšē φǻňë !!!</value>
+  </data>
+  <data name="CloseSnippetsPaneButton.[using:Windows.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
+    <value>Ćℓǿŝé ρдŉé !!!</value>
+  </data>
+  <data name="TabMoveLeft" xml:space="preserve">
+    <value>Μŏνê ĺэƒť !!!</value>
+  </data>
+  <data name="TabMoveRight" xml:space="preserve">
+    <value>Мóνε яίģнŧ !!!</value>
+  </data>
+  <data name="TabMoveUp" xml:space="preserve">
+    <value>Мøνё ūφ !!</value>
+    <comment>Command in a tab context menu that moves the selected tab earlier in a vertical tab list.</comment>
+  </data>
+  <data name="TabMoveDown" xml:space="preserve">
+    <value>Мǿνε ďőẃⁿ !!!</value>
+    <comment>Command in a tab context menu that moves the selected tab later in a vertical tab list.</comment>
+  </data>
+  <data name="InvalidRegex" xml:space="preserve">
+    <value>Дŉ ΐňνãľîδ ŗěğµℓдř ë×ρяēѕšιбή ẃăѕ ƒοůŉđ. !!! !!! !!! !!!</value>
+  </data>
+<data name="InitShellIntegrationSuccessMessage" xml:space="preserve"><value>Shell integration has been configured. Please restart your PowerShell session or open a new tab for the changes to take effect.</value></data><data name="CommandPaletteModeAnnouncement_AgentBackgroundMode" xml:space="preserve"><value>Agent background task mode</value><comment>This text will be read aloud using assistive technologies when the command palette switches into the agent background task mode.</comment></data><data name="InitShellIntegrationSuccessTitle" xml:space="preserve"><value>Shell Integration Initialized</value></data><data name="CmdPalAgentBackgroundPrompt" xml:space="preserve"><value>Run agent task in background...</value><comment>Placeholder text shown in the command palette search box when in agent background task mode.</comment></data><data name="CommandPaletteModeAnnouncement_AgentForegroundMode" xml:space="preserve"><value>Agent prompt mode</value><comment>This text will be read aloud using assistive technologies when the command palette switches into the agent foreground prompt mode.</comment></data><data name="AgentNotConfiguredSubtitle" xml:space="preserve"><value>No AI agent could be found. Install an agent (e.g. copilot, gemini) and make sure it is on your PATH, or configure one in Settings &gt; AI Agents.</value><comment>{Locked="PATH","copilot","gemini"}
+In this context, "agent" refers to an AI agent (e.g. Copilot, Claude, Gemini), not a human agent or representative.</comment></data><data name="InitShellIntegrationErrorMessage" xml:space="preserve"><value>Failed to initialize shell integration. Could not determine your PowerShell profile path. Make sure the target shell is installed.</value></data><data name="InitShellIntegrationErrorTitle" xml:space="preserve"><value>Shell Integration Error</value></data><data name="InitShellIntegrationAlreadyConfiguredTitle" xml:space="preserve"><value>Shell Integration Already Configured</value></data><data name="CmdPalAgentForegroundPrompt" xml:space="preserve"><value>Ask agent...</value><comment>Placeholder text shown in the command palette search box when in agent foreground prompt mode.</comment></data><data name="InitShellIntegrationAlreadyConfiguredMessage" xml:space="preserve"><value>Shell integration is already configured in your PowerShell profile.</value></data><data name="AgentNotConfiguredTitle" xml:space="preserve"><value>AI Assistant is not available</value></data>
+  <!-- ═══ FRE Welcome Page ═══ -->
+  <data name="FreOverlay_WelcomeTitle.Text" xml:space="preserve">
+    <value>Welcome to Intelligent Terminal</value>
+    <comment>{Locked=qps-ploc,qps-ploca,qps-plocm} "Intelligent Terminal" is the product name.</comment>
+  </data>
+  <data name="FreOverlay_WelcomeSubtitlePrefix" xml:space="preserve">
+    <value>Set up your built-in assistant to help you explain errors, draft commands, and unblock tasks right where you work. </value>
+    <comment>Text shown immediately before the FreOverlay_WelcomeSubtitleLink hyperlink. Include any spacing needed to separate the prefix from the link in the target language.</comment>
+  </data>
+  <data name="FreOverlay_WelcomeSubtitleLink" xml:space="preserve">
+    <value>Learn more about Intelligent Terminal</value>
+    <comment>{Locked=qps-ploc,qps-ploca,qps-plocm} "Intelligent Terminal" is the product name.</comment>
+  </data>
+  <data name="FreOverlay_Card1Title.Text" xml:space="preserve">
+    <value>Stay in flow with your built-in AI agent</value>
+    <comment>In this context, "agent" refers to an AI agent (e.g. Copilot, Claude, Gemini), not a human agent or representative.</comment>
+  </data>
+  <data name="FreOverlay_Card1Description.Text" xml:space="preserve">
+    <value>Your agent stays aware of what's happening in your terminal and can help you understand and fix errors as they appear.</value>
+    <comment>In this context, "agent" refers to an AI agent (e.g. Copilot, Claude, Gemini), not a human agent or representative.</comment>
+  </data>
+  <data name="FreOverlay_Card2Title.Text" xml:space="preserve">
+    <value>Pick up right where you left off</value>
+  </data>
+  <data name="FreOverlay_Card2Description.Text" xml:space="preserve">
+    <value>Keep track of your active and past agent sessions and jump back into your work in seconds. Review what's in progress or revisit earlier work without losing your place.</value>
+    <comment>In this context, "agent" refers to an AI agent (e.g. Copilot, Claude, Gemini), not a human agent or representative.</comment>
+  </data>
+  <data name="FreOverlay_NextButton.Content" xml:space="preserve">
+    <value>Next</value>
+  </data>
+  <!-- ═══ FRE Settings Page ═══ -->
+  <data name="FreOverlay_SettingsTitle.Text" xml:space="preserve">
+    <value>Set up your terminal</value>
+  </data>
+  <data name="FreOverlay_SettingsSubtitlePrefix" xml:space="preserve">
+    <value>Choose what to set up now. You can change these anytime. </value>
+    <comment>Text shown immediately before the FreOverlay_SettingsSubtitleLink hyperlink. Include any spacing needed to separate the prefix from the link in the target language.</comment>
+  </data>
+  <data name="FreOverlay_SettingsSubtitleLink" xml:space="preserve">
+    <value>Learn about how data is used</value>
+  </data>
+  <data name="FreOverlay_TabModeLabel.Text" xml:space="preserve">
+    <value>[!! Ťåƀ Môđê !!]</value>
+    <comment>Label for the first-run dropdown that chooses the layout of terminal tabs, not indentation or the keyboard Tab key.</comment>
+  </data>
+  <data name="FreOverlay_TabModeDescription.Text" xml:space="preserve">
+    <value>[!! Ťôğğļê ƀêţŵêêñ ţĥê ñêŵ šîđêƀåŕ ôŕ çļåššîç ĥôŕîžôñţåļ ţåƀš vîêŵ !!]</value>
+    <comment>Help text for the first-run tab layout dropdown. The sidebar shows tabs vertically in a side panel; the classic layout shows tabs horizontally across the top. This is a choice between layouts, not an on/off switch.</comment>
+  </data>
+  <data name="FreOverlay_TabModeSidebar" xml:space="preserve">
+    <value>[!! Šîđêƀåŕ !!]</value>
+    <comment>Dropdown option for displaying terminal tabs vertically in a side panel. This is the same layout called Vertical in Settings.</comment>
+  </data>
+  <data name="FreOverlay_TabModeHorizontal" xml:space="preserve">
+    <value>[!! Ĥôŕîžôñţåļ !!]</value>
+    <comment>Dropdown option for displaying terminal tabs across the top of the window. Use the same terminology as the Horizontal tab layout option in Settings.</comment>
+  </data>
+  <data name="FreOverlay_AgentLabel.Text" xml:space="preserve">
+    <value>Agent</value>
+    <comment>In this context, "agent" refers to an AI agent (e.g. Copilot, Claude, Gemini), not a human agent or representative.</comment>
+  </data>
+  <data name="FreOverlay_AgentDescription.Text" xml:space="preserve">
+    <value>Choose the agent used in the agent pane that supports ACP.</value>
+    <comment>{Locked="ACP"} Description for choosing an AI agent for the agent pane. The selected agent must support ACP. "ACP" is rendered as a hyperlink at runtime and must appear exactly once. In this context, "agent" refers to an AI agent (e.g. Copilot, Claude, Gemini), not a human agent or representative.</comment>
+  </data>
+ <data name="FreOverlay_ErrorDetectionLabel.Text" xml:space="preserve">
+   <value>Error detection</value>
+    <comment>Header for the dropdown that configures how the terminal handles failed commands.</comment>
+ </data>
+ <data name="FreOverlay_ErrorDetectionDescription.Text" xml:space="preserve">
+   <value>Automatically detect failed commands in the shell, and optionally send them to your agent for automatic fixes.</value>
+    <comment>Description for the error-detection dropdown in the first-run wizard. The dropdown includes detect-only, detect-and-fix, and off modes; the selected mode controls whether shell errors are detected and whether failed commands are automatically sent to the selected AI agent. In this context, "agent" refers to an AI agent (e.g. Copilot, Claude, Gemini), not a human agent or representative.</comment>
+  </data>
+ <data name="FreOverlay_ErrorDetectionDetectOption.Content" xml:space="preserve">
+   <value>Detect errors</value>
+    <comment>Dropdown option that detects shell errors without automatically sending failed commands to the selected AI agent.</comment>
+  </data>
+ <data name="FreOverlay_ErrorDetectionAutoFixOption.Content" xml:space="preserve">
+   <value>Detect and fix errors</value>
+    <comment>Dropdown option that detects shell errors and automatically sends failed commands to the selected AI agent. In this context, "agent" refers to an AI agent (e.g. Copilot, Claude, Gemini), not a human agent or representative.</comment>
+ </data>
+ <data name="FreOverlay_ErrorDetectionOffOption.Content" xml:space="preserve">
+   <value>Off</value>
+    <comment>Dropdown option that disables automatic shell error detection.</comment>
+ </data>
+ <data name="FreOverlay_ErrorDetectionAutoFixPolicyLocked" xml:space="preserve">
+   <value>The automatic fix option is managed by your organization.</value>
+    <comment>Text shown below the error-detection dropdown when Group Policy disables its automatic-fix option.</comment>
+ </data>
+ <data name="FreOverlay_SessionLabel.Text" xml:space="preserve">
+   <value>Sessions</value>
+ </data>
+ <data name="FreOverlay_SessionDescription.Text" xml:space="preserve">
+   <value>Track which agents are running and which need your attention.</value>
+    <comment>In this context, "agent" refers to an AI agent (e.g. Copilot, Claude, Gemini), not a human agent or representative.</comment>
+  </data>
+  <data name="FreOverlay_ShowTokenUsageAndCostLabel.Text" xml:space="preserve"><value>Token usage</value><comment>Header for a first-run toggle that shows remaining context and session cost in the terminal bottom bar.</comment></data>
+  <data name="FreOverlay_ShowTokenUsageAndCostDescription.Text" xml:space="preserve"><value>Show remaining context and session cost when available.</value><comment>Description for the token-usage visibility toggle in the first-run wizard. Either value may be unavailable.</comment></data>
+  <data name="FreOverlay_PanePositionLabel.Text" xml:space="preserve">
+    <value>Agent position</value>
+  </data>
+  <data name="FreOverlay_PanePositionDescription.Text" xml:space="preserve">
+    <value>Where your agent lives.</value>
+    <comment>Description for choosing where the AI agent pane appears within the terminal window. In this context, "agent" refers to an AI agent (e.g. Copilot, Claude, Gemini), not a human agent or representative.</comment>
+  </data>
+  <data name="FreOverlay_SaveButton.Content" xml:space="preserve">
+    <value>Get Started</value>
+  </data>
+  <!-- ═══ FRE Dynamic strings (used from C++ code-behind) ═══ -->
+  <data name="FreOverlay_AgentStatusSetupRequired" xml:space="preserve">
+    <value> [!! (setup required) !!]</value>
+    <comment>Status suffix appended directly to the GitHub Copilot display name when Copilot is confirmed missing and will be set up later in the Agent pane. Include any spacing and punctuation needed to separate the suffix from the agent name.</comment>
+  </data>
+  <data name="FreOverlay_AgentStatusInstalled" xml:space="preserve">
+    <value> (installed)</value>
+    <comment>Status suffix appended directly to an AI agent display name when that agent is already installed. Include any spacing and punctuation needed to separate the suffix from the agent name.</comment>
+  </data>
+  <data name="FreOverlay_AgentProbeUnavailable" xml:space="preserve">
+    <value>[!! We couldn't check which agents are installed. Availability will be checked again when the Agent pane opens. !!]</value>
+    <comment>Non-blocking warning shown in the first-run settings page when installed AI agents could not be detected. In this context, "Agent pane" is the product UI that hosts an AI agent.</comment>
+  </data>
+  <data name="FreOverlay_PanePositionBottom" xml:space="preserve">
+    <value>Bottom</value>
+  </data>
+  <data name="FreOverlay_PanePositionRight" xml:space="preserve">
+    <value>Right</value>
+  </data>
+  <data name="FreOverlay_PanePositionLeft" xml:space="preserve">
+    <value>Left</value>
+  </data>
+  <data name="FreOverlay_PanePositionTop" xml:space="preserve">
+    <value>Top</value>
+  </data>
+  <data name="FreOverlay_SettingUp" xml:space="preserve">
+    <value>Setting up...</value>
+  </data>
+  <data name="FreOverlay_HookingUpAgent" xml:space="preserve">
+    <value>Hooking up {0} to your agent pane...</value>
+    <comment>Progress text shown while preparing the selected AI agent. {0} is the localized agent display name, for example "GitHub Copilot". In this context, "agent" refers to an AI agent, not a human representative.</comment>
+  </data>
+  <data name="FreOverlay_HookingUpAgentFallback" xml:space="preserve">
+    <value>Hooking up your agent pane...</value>
+    <comment>Progress text shown while preparing an AI agent when its display name is unavailable. In this context, "agent" refers to an AI agent, not a human representative.</comment>
+  </data>
+  <data name="FreOverlay_TurningOnErrorDetection" xml:space="preserve">
+    <value>Turning on error detection...</value>
+  </data>
+  <data name="FreOverlay_TurningOnSessions" xml:space="preserve">
+    <value>Turning on sessions...</value>
+  </data>
+  <data name="FreOverlay_ProgressCompleted" xml:space="preserve">
+    <value>Completed</value>
+    <comment>Accessible status for a completed step in the FRE setup progress checklist.</comment>
+  </data>
+  <data name="FreOverlay_ProgressWarning" xml:space="preserve">
+    <value>Completed with a warning</value>
+    <comment>Accessible status for a non-blocking warning in the FRE setup progress checklist.</comment>
+  </data>
+  <data name="FreOverlay_ProgressFailed" xml:space="preserve">
+    <value>Failed</value>
+    <comment>Accessible status for a failed step in the FRE setup progress checklist.</comment>
+  </data>
+  <data name="FreOverlay_ProgressAccessibleStatus" xml:space="preserve">
+    <value>{0}, {1}</value>
+    <comment>Accessible name for a completed FRE setup step. {0} is the step label and {1} is its result, such as "Completed" or "Failed".</comment>
+  </data>
+  <data name="FreOverlay_InstallError_BlockedByPolicy" xml:space="preserve">
+    <value>Installation of {0} was blocked by a Windows Package Manager policy. If you're on a managed device, contact your IT admin.</value>
+    <comment>FRE setup error. {0} is the package display name. Shown when winget reports BlockedByPolicy or an equivalent policy-related HRESULT.</comment>
+  </data>
+  <data name="FreOverlay_InstallError_Generic" xml:space="preserve">
+    <value>Couldn't install {0} (error code {1}). See the log for details, or install {0} manually.</value>
+    <comment>FRE setup error fallback. {0} is the package display name (appears twice). {1} is a pre-formatted HRESULT string like "0x80190194". Shown for failure causes we don't have a more specific message for.</comment>
+  </data>
+  <data name="FreOverlay_InstallError_GenericNoCode" xml:space="preserve">
+    <value>Couldn't install {0}. See the log for details, or install {0} manually.</value>
+    <comment>FRE setup error fallback used when no actionable error code is available (e.g. the catalog connect/search failed before an installer ever ran). {0} is the package display name (appears twice).</comment>
+  </data>
+  <data name="FreOverlay_InstallError_InstallerFailed" xml:space="preserve">
+    <value>The {0} installer reported an error (code {1}). Check the log for details, or install {0} manually.</value>
+    <comment>FRE setup error. {0} is the package display name (appears twice). {1} is the installer-reported error code as a decimal number (e.g. MSI 1603). Shown when winget reached the install phase but the installer itself failed.</comment>
+  </data>
+  <data name="FreOverlay_InstallError_Network" xml:space="preserve">
+    <value>Couldn't reach the Windows Package Manager while installing {0}. Check your internet connection (VPN, proxy, or firewall may be blocking it) and try again.</value>
+    <comment>{Locked="VPN"} FRE setup error. {0} is the package display name (FreOverlay_PackageDisplayName_Copilot or _Node). Shown when winget couldn't reach its catalog or the package download failed with a network-class HRESULT.</comment>
+  </data>
+  <data name="FreOverlay_InstallError_NoCompatibleInstaller" xml:space="preserve">
+    <value>No compatible installer for {0} is available on this system (OS version or architecture may not be supported). Install {0} manually.</value>
+    <comment>FRE setup error. {0} is the package display name (appears twice). Shown when winget returned NoApplicableInstallers — the manifest exists but no installer entry matches this OS/arch/scope.</comment>
+  </data>
+  <data name="FreOverlay_InstallError_PackageNotFound" xml:space="preserve">
+    <value>{0} wasn't found in the Windows Package Manager catalog. Try refreshing winget sources, or install {0} manually.</value>
+    <comment>{Locked="winget"} FRE setup error. {0} is the package display name (appears twice). Shown when no manifest with the requested package ID was returned from the catalog search.</comment>
+  </data>
+  <data name="FreOverlay_InstallError_Timeout" xml:space="preserve">
+    <value>Installing {0} took longer than 20 minutes. Intelligent Terminal stopped waiting, but the installer may still be running in the background. Check Task Manager, or try again later.</value>
+    <comment>{Locked="Intelligent Terminal","Task Manager"} FRE setup error. {0} is the package display name. Shown when our 20-minute hard timeout expired before the install completed.</comment>
+  </data>
+  <data name="FreOverlay_InstallErrorWingetMissing" xml:space="preserve">
+    <value>Windows Package Manager (winget) is not installed or not available. Install it first, then try again.</value>
+    <comment>{Locked="winget"} Error shown in the FRE setup overlay when a prerequisite install was attempted but winget itself is not available on this system.</comment>
+  </data>
+  <data name="FreOverlay_PackageDisplayName_Copilot" xml:space="preserve">
+    <value>GitHub Copilot</value>
+    <comment>{Locked="GitHub Copilot"} Product display name substituted into the FreOverlay_InstallError_* templates when reporting a winget install failure for the Copilot CLI prerequisite.</comment>
+  </data>
+  <data name="FreOverlay_PackageDisplayName_Node" xml:space="preserve">
+    <value>Node.js (LTS)</value>
+    <comment>{Locked="Node.js","LTS"} Product display name substituted into the FreOverlay_InstallError_* templates when reporting a winget install failure for the Node.js prerequisite.</comment>
+  </data>
+  <data name="FreOverlay_InstallErrorHooks" xml:space="preserve">
+    <value>Failed to install session hooks. Session management has been turned off. You can re-enable it and try again, or save to continue without it.</value>
+    <comment>{Locked="hooks"} FRE setup error shown when session hooks cannot be installed. Session management is turned off so setup can continue, and the user may re-enable it to retry.</comment>
+  </data>
+  <data name="FreOverlay_InstallErrorShellIntegration" xml:space="preserve">
+    <value>Failed to install shell integration. Error detection has been turned off. You can re-enable it and try again, or save to continue without it.</value>
+    <comment>FRE setup error shown when shell integration cannot be installed. Error detection is turned off so setup can continue, and the user may re-enable it to retry.</comment>
+  </data>
+  <data name="FreOverlay_ErrorHelpLink" xml:space="preserve">
+    <value>Learn how to fix this manually</value>
+    <comment>Hyperlink shown below an FRE setup error message. Opens step-by-step manual setup instructions in the browser.</comment>
+  </data>
+  <data name="FreOverlay_ToggleOn" xml:space="preserve">
+    <value>On</value>
+  </data>
+  <data name="FreOverlay_ToggleOff" xml:space="preserve">
+    <value>Off</value>
+  </data>
+  <data name="AgentBlockedByPolicyTitle" xml:space="preserve">
+    <value>AI agents are restricted</value>
+    <comment>{Locked=qps-ploc,qps-ploca,qps-plocm} Title shown when Group Policy blocks the user from opening the agent pane.</comment>
+  </data>
+  <data name="AgentBlockedByPolicySubtitle" xml:space="preserve">
+    <value>Your organization's policy does not allow any AI agents. Contact your IT administrator for assistance.</value>
+    <comment>{Locked=qps-ploc,qps-ploca,qps-plocm} Subtitle shown when Group Policy blocks all AI agents from running.</comment>
+  </data>
+  <data name="FreOverlay_PolicyLocked" xml:space="preserve">
+    <value>This setting is managed by your organization.</value>
+    <comment>Text shown below a first-run setting when Group Policy manages or restricts the feature. The associated control may be disabled or filtered to allowed choices. Standard Windows policy notice wording.</comment>
+  </data>
+  <data name="Diagnostics_AnalyzingTooltip" xml:space="preserve">
+    <value>Analyzing error…</value>
+    <comment>Tooltip for the diagnostics button while an automatic error analysis is in progress.</comment>
+  </data>
+  <data name="Diagnostics_ErrorPendingLabel" xml:space="preserve">
+    <value>Error detected: analyzing…</value>
+    <comment>Short status label shown next to the diagnostics button while an automatic error analysis is in progress.</comment>
+  </data>
+  <data name="Diagnostics_ErrorArmedLabelFormat" xml:space="preserve">
+    <value>Error detected: {0} to fix</value>
+    <comment>Short status label shown next to the diagnostics button when a fix is ready. {0} is replaced with the keyboard shortcut.</comment>
+  </data>
+  <data name="Diagnostics_ErrorDetectedLabelFormat" xml:space="preserve">
+    <value>Click or press {0} to ask the agent for a suggested fix</value>
+    <comment>Short status label shown next to the diagnostics button when an error is detected and a fix can be requested. {0} is replaced with the keyboard shortcut.</comment>
+  </data>
+  <data name="Diagnostics_ReviewLabelFormat" xml:space="preserve">
+    <value>Fix ready. Press {0} to review</value>
+    <comment>Short status label shown next to the diagnostics button when an analysis result is ready and the agent pane is closed; pressing the shortcut opens the pane to review. {0} is replaced with the keyboard shortcut.</comment>
+  </data>
+  <data name="Diagnostics_ReviewTooltip" xml:space="preserve">
+    <value>Open the agent pane to review the suggested fix</value>
+    <comment>Tooltip on the diagnostics button when an analysis result is ready to review in the agent pane.</comment>
+  </data>
+  <data name="Diagnostics_ErrorDetectedTooltipFormat" xml:space="preserve">
+    <value>Error detected. Click or press {0} to ask the AI agent to diagnose and suggest a fix.</value>
+    <comment>Tooltip for the diagnostics button when an error is detected and a fix can be requested. {0} is replaced with the keyboard shortcut.</comment>
+  </data>
+  <data name="Diagnostics_FixReadyTooltipFormat" xml:space="preserve">
+    <value>Fix ready — {0} to apply</value>
+    <comment>Tooltip for the diagnostics button when a fix is ready. {0} is replaced with the keyboard shortcut.</comment>
+  </data>
+  <data name="Diagnostics_FixReadyTooltipWithPreviewFormat" xml:space="preserve">
+    <value>Fix ready — {0} to apply: {1}</value>
+    <comment>Tooltip for the diagnostics button when a fix is ready. {0} is replaced with the keyboard shortcut; {1} is a preview of the suggested command or fix.</comment>
+  </data>
+  <data name="Diagnostics_SuggestionReadyLabel" xml:space="preserve">
+    <value>Suggestion ready — open agent pane</value>
+    <comment>Short status label shown next to the diagnostics button when a suggestion is available in the agent pane.</comment>
+  </data>
+  <data name="Diagnostics_SuggestionTooltipIntro" xml:space="preserve">
+    <value>Auto-fix declined to fix this directly. </value>
+    <comment>First sentence of the diagnostics tooltip when automatic fix generation declines to apply a fix directly. Preserve the trailing space; additional guidance follows in the same tooltip.</comment>
+  </data>
+  <data name="Diagnostics_SuggestionTooltipInstruction" xml:space="preserve">
+    <value>Click here or press Ctrl+Shift+. to open the agent pane and read the full suggestion.</value>
+    <comment>Second sentence of the diagnostics tooltip when a suggestion is available. {Locked="Ctrl+Shift+."}</comment>
+  </data>
+  <data name="Diagnostics_Tooltip" xml:space="preserve">
+    <value>Diagnostics</value>
+    <comment>Tooltip for the diagnostics button when there is no active diagnostic.</comment>
+  </data>
+  <data name="AgentPane_SessionsTitle" xml:space="preserve">
+    <value>Agent sessions</value>
+    <comment>Title shown in the agent pane title bar when the session-management view is active. In this context, agent refers to an AI agent, not a human representative.</comment>
+  </data>
+  <data name="AgentPane_SwitchAgentAutomationName" xml:space="preserve">
+    <value>Switch agent</value>
+    <comment>Accessibility (screen reader) name for the agent-bar button that opens a menu to pick which AI agent runs in this tab. In this context, agent refers to an AI agent, not a human representative.</comment>
+  </data>
+  <data name="AgentPane_SessionsTitleFormat" xml:space="preserve">
+    <value>Agent sessions: {0}</value>
+    <comment>Title shown in the agent pane title bar when the session-management view is active. {0} is replaced with the AI agent display name.</comment>
+  </data>
+  <data name="AgentPane_SessionsDisabledHint.Text" xml:space="preserve">
+    <value>For the best session management experience, turn on Sessions in Settings &gt; Agents.</value>
+    <comment>Subtle hint below the agent sessions title, shown only in session management when Sessions is off and policy permits changes. Navigation is Settings &gt; Agents, then turn on Sessions. Match the displayed labels: Settings uses SettingsMenuItem/SettingsTab, Agents uses Nav_AIAgents.Content, and Sessions uses AIAgents_SessionManagement.Header, including fallback labels where a locale has no translation. Turning Sessions off only prevents hook updates; existing hooks and session functionality can keep working. Do not imply that tracking, data refresh, or functionality stops.</comment>
+  </data>
+  <data name="TerminalProtocolTeachingTipTitle" xml:space="preserve">
+    <value>Terminal Protocol</value>
+    <comment>Title for the teaching tip that displays Terminal Protocol connection information. {Locked="Terminal Protocol"}</comment>
+  </data>
+  <data name="InitShellIntegrationExecutionPolicyErrorMessage" xml:space="preserve">
+    <value>PowerShell execution policy is blocking scripts.</value>
+    <comment>Body of an error dialog shown after the user tries to install PowerShell shell integration but their PowerShell execution policy (Restricted or AllSigned) is blocking scripts. A separate "Learn how to fix this manually" hyperlink (FreOverlay_ErrorHelpLink) is rendered on its own line below this sentence. {Locked="PowerShell"}</comment>
+  </data>
+  <data name="FreOverlay_InstallErrorShellIntegrationExecutionPolicy" xml:space="preserve">
+    <value>PowerShell execution policy is blocking scripts. Error detection turned off.</value>
+    <comment>{Locked="PowerShell"} FRE setup error shown when PowerShell execution policy prevents shell-integration scripts from running. Error detection is turned off so setup can continue.</comment>
+  </data>
+  <data name="UsageGroup/[using:Windows.UI.Xaml.Automation]AutomationProperties/Name" xml:space="preserve"><value>Usage</value><comment>Accessibility name for the session usage summary in the terminal bottom bar.</comment></data>
+  <data name="Usage_TokensUnit" xml:space="preserve"><value>tokens</value><comment>Unit label for AI context-window token counts. Translate this term using the established AI/LLM terminology for the locale.</comment></data>
+  <data name="Usage_ContextWindowLabel" xml:space="preserve"><value>Context Window</value><comment>Label for the AI agent context-window usage percentage shown in the terminal bottom bar.</comment></data>
+  <data name="CmdAppHelpFooter" xml:space="preserve">
+    <value>Ŋõŧέ: Цňřέ¢ŏĝŋìźēđ дŗġμмēηţś ąřё àűтόmąťΐċâľĺŷ φαššеď ťò ťĥз 'new-tab' šüьçόmмãŉð. !!! !!! !!! !!! !!! !!! !!! !!! 
+₣őѓ ęхäмρĺё, 'wt -p "Űьűņŧυ" -d Ç:\' ĩś еqυϊνаℓэпţ ťõ 'wt new-tab -p "Űвũлτũ" -d Ć:\'. !!! !!! !!! !!! !!! !!! !!! !!! !
+₣òŕ ăłļ åνãϊłάвļê ôφŧιôņş, ґùη 'wt new-tab --help'. !!! !!! !!! !!! !!!</value>
+    <comment>{Locked="wt","new-tab","-p","-d","--help"}</comment>
+  </data>
+  <data name="AgentPane_DefaultTitle" xml:space="preserve">
+    <value>AI assistant</value>
+    <comment>Default title shown in the agent pane title bar before an agent reports its name. "AI assistant" refers to the built-in AI coding assistant, not a human assistant.</comment>
+  </data>
+  <data name="AgentPane_ConnectingTitle" xml:space="preserve">
+    <value>Agent · Connecting</value>
+    <comment>Status shown in the agent pane title bar while the AI agent is connecting. Preserve the centered dot separator. Here "agent" means an AI intelligent agent, not a proxy or human agent.</comment>
+  </data>
+  <data name="NotificationIconRestoreKeptTab" xml:space="preserve">
+    <value>[!! &#x202e;Restore&#x202c; !!]</value>
+    <comment>Command in the notification-area menu that brings a background tab and its still-running terminal panes back into a window. It does not restart the processes or restore a file backup.</comment>
+  </data>
+  <data name="KeepTabRunningText" xml:space="preserve">
+    <value>[!! ‮Keep tab running‬ !!]</value>
+    <comment>Command at the top of a vertical terminal tab's context menu that enables keeping all panes running after the tab or window is closed. Also labels the tab's keep-running status indicator. This does not pin the tab or save it for a restart.</comment>
+  </data>
+  <data name="PinTabText" xml:space="preserve">
+    <value>[!! &#x202e;Pin tab&#x202c; !!]</value>
+    <comment>Context menu action to keep a terminal tab at the start of the tab list until unpinned. Does not keep its processes running after closing or persist across restarts.</comment>
+  </data>
+  <data name="PinTabToolTip" xml:space="preserve">
+    <value>[!! &#x202e;Move this tab before unpinned tabs.&#x202c; !!]</value>
+  </data>
+  <data name="UnpinTabText" xml:space="preserve">
+    <value>[!! &#x202e;Unpin tab&#x202c; !!]</value>
+    <comment>Context menu action to move a pinned terminal tab back into the regular tab group.</comment>
+  </data>
+  <data name="UnpinTabToolTip" xml:space="preserve">
+    <value>[!! &#x202e;Move this tab after pinned tabs.&#x202c; !!]</value>
+  </data>
+  <data name="PinnedTabName" xml:space="preserve">
+    <value>[!! &#x202e;Pinned&#x202c; !!]</value>
+    <comment>Accessibility name and tooltip for a terminal tab pinned at the beginning of the tab list.</comment>
+  </data>
+  <data name="CollapsedPinnedTabIcon.AutomationProperties.Name" xml:space="preserve">
+    <value>[!! &#x202e;Pinned&#x202c; !!]</value>
+    <comment>Accessibility name for the pin indicator on a terminal tab in the collapsed sidebar.</comment>
+  </data>
+  <data name="KeepTabRunningToolTip" xml:space="preserve">
+    <value>[!! ‮Keep this tab running in the background after closing the tab or window.‬ !!]</value>
+    <comment>Tooltip and accessibility help for Keep tab running. Includes shell panes and the AI assistant; their current processes and sessions stay alive, rather than restarting later.</comment>
+  </data>
+  <data name="TurnOffKeepTabRunningText" xml:space="preserve">
+    <value>[!! ‮Turn off keep running‬ !!]</value>
+    <comment>Command shown instead of Keep tab running when that tab already has keep running enabled. It only turns off the background-running behavior; it does not close the tab or stop its current processes immediately.</comment>
+  </data>
+  <data name="TurnOffKeepTabRunningToolTip" xml:space="preserve">
+    <value>[!! ‮This tab will no longer stay running after you close the tab or window.‬ !!]</value>
+    <comment>Tooltip and accessibility help for Turn off keep running. After this action, closing the tab or its window closes its panes normally instead of retaining them in the background. The current tab and processes are not closed by this action.</comment>
+  </data>
+  <data name="VerticalTabsHistoryStatusIdle" xml:space="preserve">
+    <value>[!! Îďĺé !!]</value>
+    <comment>Agent History session status: the session is live but has no active work.</comment>
+  </data>
+  <data name="VerticalTabsHistoryStatusWorking" xml:space="preserve">
+    <value>[!! Àçţïṽé !!]</value>
+    <comment>Agent History session status: the agent is actively processing a request.</comment>
+  </data>
+  <data name="VerticalTabsHistoryStatusAttention" xml:space="preserve">
+    <value>[!! Ŵåïţïñğ ƒöŕ ïñṗûţ !!]</value>
+    <comment>Agent History session status: the agent needs a response or approval from the user.</comment>
+  </data>
+  <data name="VerticalTabsHistoryStatusError" xml:space="preserve">
+    <value>[!! Éŕŕöŕ !!]</value>
+    <comment>Agent History session status: the session encountered an error.</comment>
+  </data>
+  <data name="VerticalTabsHistoryStatusHistorical" xml:space="preserve">
+    <value>[!! Ĥïşţöŕïçåĺ !!]</value>
+    <comment>Agent History session status: a closed or saved session with no live pane. Both ended and historical registry states use this label.</comment>
+  </data>
+  <data name="VerticalTabsHistoryStatusUnknown" xml:space="preserve">
+    <value>[!! Ûñķñöŵñ !!]</value>
+    <comment>Agent History session status: the registry did not provide a recognized status.</comment>
+  </data>
+  <data name="VerticalTabsHistoryAgeJustNow" xml:space="preserve">
+    <value>[!! ĵûşţ ñöŵ !!]</value>
+    <comment>Agent History relative time: the session&apos;s latest activity was less than one minute ago.</comment>
+  </data>
+  <data name="VerticalTabsHistoryAgeMinute" xml:space="preserve">
+    <value>[!! 1 ḿïñûţé åğö !!]</value>
+    <comment>Agent History relative time: the session&apos;s latest activity was one minute ago.</comment>
+  </data>
+  <data name="VerticalTabsHistoryAgeMinutes" xml:space="preserve">
+    <value>[!! {0} ḿïñûţéş åğö !!]</value>
+    <comment>Agent History relative time. {0} is the whole number of minutes since the session&apos;s latest activity, from 2 to 59.</comment>
+  </data>
+  <data name="VerticalTabsHistoryAgeHour" xml:space="preserve">
+    <value>[!! 1 ĥöûŕ åğö !!]</value>
+    <comment>Agent History relative time: the session&apos;s latest activity was one hour ago.</comment>
+  </data>
+  <data name="VerticalTabsHistoryAgeHours" xml:space="preserve">
+    <value>[!! {0} ĥöûŕş åğö !!]</value>
+    <comment>Agent History relative time. {0} is the whole number of hours since the session&apos;s latest activity, from 2 to 23.</comment>
+  </data>
+  <data name="VerticalTabsHistoryAgeDay" xml:space="preserve">
+    <value>[!! 1 ďåý åğö !!]</value>
+    <comment>Agent History relative time: the session&apos;s latest activity was one day ago.</comment>
+  </data>
+  <data name="VerticalTabsHistoryAgeDays" xml:space="preserve">
+    <value>[!! {0} ďåýş åğö !!]</value>
+    <comment>Agent History relative time. {0} is the whole number of days since the session&apos;s latest activity, at least 2.</comment>
+  </data>
+  <data name="VerticalTabsHistoryAgeUnknown" xml:space="preserve">
+    <value>[!! Ûñķñöŵñ !!]</value>
+    <comment>Agent History time label when the session&apos;s latest activity timestamp is missing or invalid. Do not imply that the session was recently active.</comment>
+  </data>
+  <data name="NotificationIconCloseAllKeptTabs" xml:space="preserve">
+    <value>[!! ‮Close all keep-running tabs‬ !!]</value>
+    <comment>Command below the background tabs in the notification-area menu. Closes all detached tabs retained by Keep tab running and terminates their panes and processes. Does not close tabs still in a window or only turn off keep running.</comment>
+  </data>
+  <data name="PaneProgressStatusNormal" xml:space="preserve">
+    <value>[!! ‮Progress‬ !!]</value>
+    <comment>Accessibility status for normal determinate OSC 9;4 progress. A localized percentage is appended.</comment>
+  </data>
+  <data name="PaneProgressStatusError" xml:space="preserve">
+    <value>[!! ‮Error‬ !!]</value>
+    <comment>Accessibility status for error OSC 9;4 progress. A localized percentage is appended.</comment>
+  </data>
+  <data name="PaneProgressStatusIndeterminate" xml:space="preserve">
+    <value>[!! ‮Indeterminate progress‬ !!]</value>
+    <comment>Accessibility status for OSC 9;4 progress with an unknown percentage. No percentage is appended.</comment>
+  </data>
+  <data name="PaneProgressStatusPaused" xml:space="preserve">
+    <value>[!! ‮Paused‬ !!]</value>
+    <comment>Accessibility status for temporarily paused OSC 9;4 progress. A localized percentage is appended; this does not mean waiting for user input or approval.</comment>
+  </data>
+</root>

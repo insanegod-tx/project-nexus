@@ -1,0 +1,8124 @@
+use super::conn;
+use super::failure::{AgentFailure, HandshakeStage};
+use super::prompt_builder::{
+    acp_log_built_prompt, build_prompt_text, log_turn_trace, TemplateKind, TemplateMemo,
+};
+use super::soft_stop::SoftStopReason;
+use super::turn_metrics::{now_unix_s, prompt_preview, PromptTimingState};
+use agent_client_protocol as acp;
+use anyhow::Result;
+use std::collections::{HashMap, HashSet};
+use std::sync::{
+    atomic::{AtomicBool, AtomicU64, Ordering},
+    Arc, Mutex,
+};
+use tokio::sync::mpsc;
+use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
+use tokio_util::sync::CancellationToken;
+
+use crate::agent_tools::session_mcp::{server_identity, SessionMcpTool};
+use crate::app_contracts::{AcpModelInfo, AppEvent, PermOption, PlanEntry, PlanEntryStatus};
+use crate::pane_context::PaneContext;
+use crate::shell::{ShellManager, TerminalConfig};
+
+const ACP_SESSION_USAGE_SCHEMA: &str = "acp.v1.session_usage";
+// Normal helper startup can race a slow wta-master cold start: master opens its
+// pipe only after spawning and initializing the agent CLI (up to 60s for npx
+// adapters), so keep a long budget there.
+const MASTER_PIPE_BACKOFF_MS: &[u64] = &[
+    50, 100, 100, 200, 200, 500, 500, 1000, 1000, 2000, 2000, 2000, 5000, 5000, 5000, 5000, 10000,
+    10000, 10000, 15000,
+];
+// Post-login reconnect is different: if the old master pipe is gone, the right
+// recovery is a fresh master restart. Keep a short bounded retry so brief
+// respawn/ERROR_PIPE_BUSY windows are tolerated without stranding the user for
+// the full cold-start budget.
+const POST_LOGIN_MASTER_PIPE_BACKOFF_MS: &[u64] = &[
+    50, 100, 100, 200, 200, 500, 500, 1000, 1000, 2000, 2000, 2000,
+];
+
+fn post_login_authenticate_error(method_id: &str, e: &acp::Error) -> anyhow::Error {
+    let failure = AgentFailure::from_acp_error(e);
+    if failure.is_auth() {
+        return anyhow::Error::new(failure).context(format!(
+            "authenticate({}) still requires authentication after login: {} (code {})",
+            method_id,
+            e.message,
+            Into::<i32>::into(e.code),
+        ));
+    }
+
+    anyhow::Error::new(AgentFailure::HandshakeFailed {
+        stage: HandshakeStage::Authenticate,
+        detail: format!(
+            "authenticate({}) failed: {} (code {}). \
+             The agent returned an error during authentication. \
+             Try restarting Intelligent Terminal.",
+            method_id,
+            e.message,
+            Into::<i32>::into(e.code),
+        ),
+    })
+}
+
+// Form A mock-ACP-agent harness + scenario tests (in-process, deterministic).
+// Lives as a sibling file so it stays out of this large module, but is a child
+// of `client` so it can reach the private `WtaClient` / `ClientState`.
+// `pub(crate)` so app-module tests can borrow `connect_mock_agent` and assert
+// on App state.
+#[cfg(test)]
+#[path = "mock_agent_tests.rs"]
+pub(crate) mod mock_agent_tests;
+
+#[derive(Debug, Clone)]
+pub struct PromptSubmission {
+    pub id: u64,
+    cancellation: CancellationToken,
+    pub text: String,
+    pub pane_context: Option<PaneContext>,
+    pub submitted_at_unix_s: f64,
+    /// Distinguishes planner prompts from manual and automatic auto-fix
+    /// inputs. Automatic summaries are untrusted diagnostic context, while
+    /// text supplied to `/fix` is user intent.
+    pub autofix_text_kind: Option<AutofixTextKind>,
+    /// Agent-advertised slash commands are sent verbatim, without planner
+    /// templates or terminal context.
+    agent_command: bool,
+    /// Images pasted into the input via Alt+V. Sent to the agent as ACP
+    /// `ContentBlock::Image` blocks appended after the text block (only when
+    /// the agent advertised `promptCapabilities.image`). Empty for the common
+    /// text-only and all auto-fix prompts.
+    pub images: Vec<crate::clipboard_image::PastedImage>,
+    is_byok: bool,
+    agent_id: String,
+    reattached_session_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutofixTextKind {
+    UserRequest,
+    FailureSummary,
+}
+
+#[derive(Debug, Clone, Default)]
+struct PromptUsageIdentity {
+    family_id: Option<String>,
+    reporter_id: Option<String>,
+}
+
+fn is_redundant_startup_model_error(identity: &PromptUsageIdentity, error: &acp::Error) -> bool {
+    identity.family_id.as_deref() == Some(crate::agent_registry::GEMINI_AGENT_ID)
+        && identity.reporter_id.as_deref() == Some("gemini-cli")
+        && error.code == acp::ErrorCode::MethodNotFound
+}
+
+type SharedInFlightPrompts = Arc<std::sync::Mutex<HashMap<String, u64>>>;
+type SharedTabAliases = Arc<std::sync::Mutex<HashMap<String, String>>>;
+type SharedTabBindingGenerations = Arc<std::sync::Mutex<HashMap<String, u64>>>;
+type LifecycleTask = tokio::task::JoinHandle<()>;
+
+fn resolve_tab_alias_locked(aliases: &HashMap<String, String>, tab_id: &str) -> String {
+    let mut current = tab_id;
+    let mut visited = HashSet::new();
+    while visited.insert(current.to_string()) {
+        let Some(next) = aliases.get(current) else {
+            break;
+        };
+        current = next;
+    }
+    current.to_string()
+}
+
+fn resolve_tab_alias(aliases: &SharedTabAliases, tab_id: &str) -> String {
+    resolve_tab_alias_locked(&aliases.lock().unwrap(), tab_id)
+}
+
+fn begin_tab_binding_operation(
+    aliases: &SharedTabAliases,
+    generations: &SharedTabBindingGenerations,
+    tab_id: &str,
+) -> (String, u64) {
+    let tab_id = resolve_tab_alias(aliases, tab_id);
+    let mut generations = generations.lock().unwrap();
+    let generation = generations.entry(tab_id.clone()).or_default();
+    *generation = generation.wrapping_add(1);
+    (tab_id, *generation)
+}
+
+fn current_tab_binding_operation(
+    aliases: &SharedTabAliases,
+    generations: &SharedTabBindingGenerations,
+    tab_id: &str,
+    generation: u64,
+) -> Option<String> {
+    let tab_id = resolve_tab_alias(aliases, tab_id);
+    (generations.lock().unwrap().get(&tab_id) == Some(&generation)).then_some(tab_id)
+}
+
+fn invalidate_tab_binding(
+    aliases: &SharedTabAliases,
+    generations: &SharedTabBindingGenerations,
+    tab_id: &str,
+) -> String {
+    begin_tab_binding_operation(aliases, generations, tab_id).0
+}
+
+struct PromptDispatchCleanup {
+    tab_key: String,
+    prompt_id: u64,
+    in_flight_tabs: SharedInFlightPrompts,
+    released: bool,
+}
+
+impl PromptDispatchCleanup {
+    fn release(&mut self) {
+        if self.released {
+            return;
+        }
+        self.released = true;
+        let mut in_flight = self.in_flight_tabs.lock().unwrap();
+        let matching_key = if in_flight.get(&self.tab_key) == Some(&self.prompt_id) {
+            Some(self.tab_key.clone())
+        } else {
+            in_flight
+                .iter()
+                .find_map(|(key, id)| (*id == self.prompt_id).then(|| key.clone()))
+        };
+        if let Some(key) = matching_key {
+            in_flight.remove(&key);
+        }
+    }
+}
+
+impl Drop for PromptDispatchCleanup {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+struct PromptTask {
+    cancellation: CancellationToken,
+    handle: tokio::task::JoinHandle<()>,
+}
+
+/// User-initiated request to spin up a fresh ACP session for a given tab,
+/// dropping the previous session's history. Emitted by the `/new` slash
+/// command. The ACP client task removes the old SessionId from its
+/// per-tab cache and calls `new_session(cwd)`.
+/// Once the replacement is bound, master retires the old session's routing,
+/// live-registry row, and session-scoped capabilities. The resulting
+/// [`AppEvent::SessionAttached`] then propagates back to the UI to
+/// rewire `session_to_tab` and update the model dropdown.
+#[derive(Debug, Clone)]
+pub struct NewSessionForTab {
+    pub tab_id: String,
+    /// Optional cwd override. When `None`, the client falls back to the
+    /// process-wide `current_dir()` (same default as the lazy-create path).
+    pub cwd: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentReconnectRequest {
+    pub operation_id: String,
+    pub window_id: String,
+    pub generation: u64,
+    pub agent_id: String,
+    pub acp_model: Option<String>,
+    pub custom_model_selection: Option<String>,
+    pub agent_source: crate::agent_source::AgentSource,
+}
+
+/// Control requests that end or replace the helper's current ACP connection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentLifecycleRequest {
+    /// `/restart` asks C++ to replace the shared master and agent CLI pool.
+    RestartMaster,
+    /// Agent binding changes keep the helper process and reconnect it to the
+    /// same master with a fresh immutable per-connection binding.
+    RebindAgent(AgentReconnectRequest),
+}
+
+impl Default for AgentLifecycleRequest {
+    fn default() -> Self {
+        Self::RestartMaster
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AcpClientExit {
+    ChannelsClosed,
+    RebindAgent(AgentReconnectRequest),
+}
+
+struct ClientTransportGuard {
+    conn: conn::ClientLink,
+    suppress_transport_error: Arc<AtomicBool>,
+    event_tx: mpsc::UnboundedSender<AppEvent>,
+    io_task: Option<tokio::task::JoinHandle<()>>,
+    retirement_published: bool,
+}
+
+impl ClientTransportGuard {
+    fn io_task_mut(&mut self) -> &mut tokio::task::JoinHandle<()> {
+        self.io_task.as_mut().expect("ACP I/O task is present")
+    }
+
+    async fn reap_io_task(&mut self) {
+        if let Some(mut task) = self.io_task.take() {
+            if tokio::time::timeout(std::time::Duration::from_secs(1), &mut task)
+                .await
+                .is_err()
+            {
+                task.abort();
+                let _ = task.await;
+            }
+        }
+    }
+
+    fn io_task_completed(&mut self) {
+        self.io_task.take();
+    }
+
+    fn publish_retired(&mut self, report_master_disconnect: bool) {
+        if self.retirement_published {
+            return;
+        }
+        self.retirement_published = true;
+        if report_master_disconnect {
+            let _ = self.event_tx.send(AppEvent::MasterDisconnected);
+        }
+        let _ = self.event_tx.send(AppEvent::AgentTransportRetired);
+    }
+}
+
+impl Drop for ClientTransportGuard {
+    fn drop(&mut self) {
+        // Setup can fail after the transport exists but before the main loop
+        // owns prompt/lifecycle tasks. Finish retiring that transport
+        // asynchronously so App never waits forever for AgentTransportRetired.
+        let report_master_disconnect = claim_unexpected_transport_loss(
+            self.conn.transport_ended(),
+            &self.suppress_transport_error,
+        );
+        self.conn.shutdown();
+        let io_task = self.io_task.take();
+        let event_tx = self.event_tx.clone();
+        let publish_retired = !self.retirement_published;
+        tokio::task::spawn_local(async move {
+            if let Some(mut task) = io_task {
+                if tokio::time::timeout(std::time::Duration::from_secs(1), &mut task)
+                    .await
+                    .is_err()
+                {
+                    task.abort();
+                    let _ = task.await;
+                }
+            }
+            if publish_retired {
+                if report_master_disconnect {
+                    let _ = event_tx.send(AppEvent::MasterDisconnected);
+                }
+                let _ = event_tx.send(AppEvent::AgentTransportRetired);
+            }
+        });
+    }
+}
+
+fn claim_unexpected_transport_loss(
+    transport_ended: bool,
+    suppress_transport_error: &AtomicBool,
+) -> bool {
+    let already_suppressed = suppress_transport_error.swap(true, Ordering::AcqRel);
+    transport_ended && !already_suppressed
+}
+
+fn complete_transport_io_task(
+    io_result: std::result::Result<(), tokio::task::JoinError>,
+    suppress_transport_error: &AtomicBool,
+) -> (AcpClientExit, bool) {
+    if let Err(error) = io_result {
+        tracing::warn!(
+            target: "helper",
+            %error,
+            "ACP I/O task to master failed"
+        );
+    }
+    (
+        AcpClientExit::ChannelsClosed,
+        claim_unexpected_transport_loss(true, suppress_transport_error),
+    )
+}
+
+#[derive(Debug, Clone)]
+pub enum MasterExtRequest {
+    SessionsList {
+        request_id: u64,
+        /// When true, master re-scans the on-disk historical session logs
+        /// (`load_for_cli`) before answering — the F5 refresh path — instead of
+        /// returning the cached registry snapshot.
+        rescan: bool,
+    },
+    SessionBornBound {
+        event: crate::agent_sessions::SessionEvent,
+    },
+    SessionResumeDispatched {
+        request_id: u64,
+        sid: acp::schema::v1::SessionId,
+    },
+    SessionFocus {
+        request_id: u64,
+        sid: acp::schema::v1::SessionId,
+    },
+    /// Hot-swap the ACP model on this helper's live session(s) via
+    /// `set_session_model`, without restarting anything. Two callers:
+    /// * settings hot-reload (`acpModel` changed) and the per-pane `/model`
+    ///   picker, both in `App`.
+    ///
+    /// `session_id == Some` targets exactly that session (a per-pane `/model`
+    /// pick, or a global settings change pushed per-pane to each of this
+    /// helper's tabs); `session_id == None` fans out to every session this
+    /// helper owns.
+    SetSessionModel {
+        request_id: uuid::Uuid,
+        session_id: Option<acp::schema::v1::SessionId>,
+        model: String,
+        pane_override: bool,
+    },
+    ReconcileSessionYolo {
+        reconcile_id: u64,
+        sessions: Vec<(acp::schema::v1::SessionId, bool)>,
+        fail_closed: bool,
+    },
+    SetSessionConfigOption {
+        session_id: acp::schema::v1::SessionId,
+        config_id: String,
+        value: String,
+    },
+}
+
+fn publish_session_config_options(
+    event_tx: &mpsc::UnboundedSender<AppEvent>,
+    native_yolo: &super::native_yolo::NativeYoloState,
+    session_id: &acp::schema::v1::SessionId,
+    options: Option<&[acp::schema::v1::SessionConfigOption]>,
+) {
+    let mut options = options
+        .map(crate::protocol::acp::session_config::select_options)
+        .unwrap_or_default();
+    for option in &mut options {
+        option.native_yolo = native_yolo.is_native_config_option(session_id, &option.id);
+    }
+    let _ = event_tx.send(AppEvent::SessionConfigUpdated {
+        session_id: session_id.to_string(),
+        options,
+    });
+}
+
+fn publish_current_native_config_options(
+    event_tx: &mpsc::UnboundedSender<AppEvent>,
+    native_yolo: &super::native_yolo::NativeYoloState,
+    session_id: &acp::schema::v1::SessionId,
+    operation: &super::native_yolo::NativeYoloOperation,
+    options: Option<&[acp::schema::v1::SessionConfigOption]>,
+) -> bool {
+    if !native_yolo.operation_is_current(operation) {
+        return false;
+    }
+    if options.is_some() {
+        publish_session_config_options(event_tx, native_yolo, session_id, options);
+    }
+    true
+}
+
+/// User-initiated request to resume a historical agent session by calling
+/// the ACP `session/load` method, binding the loaded session to a
+/// specific WT tab. Emitted by the session management view's Enter
+/// handler (after WT has created a new tab and reconciled the agent pane
+/// onto it). The ACP client task calls `conn.load_session(...)`; on
+/// success the loaded SessionId is bound to the tab and `SessionAttached`
+/// propagates to the UI so subsequent prompts on that tab reuse the
+/// rehydrated session. The agent is expected to replay past session
+/// content via `session/update` notifications during/after the
+/// `load_session` call.
+#[derive(Debug, Clone)]
+pub struct LoadSessionForTab {
+    pub tab_id: String,
+    /// The CLI's own session id (Claude UUID, Gemini sessionId, Copilot
+    /// session-state folder name). Sent verbatim as the ACP `sessionId`
+    /// — works when the currently-connected ACP agent matches the
+    /// historical session's CLI source. CLI mismatches surface as
+    /// `AgentError` via the agent's JSON-RPC error response.
+    pub session_id: String,
+    /// Working directory to associate with the loaded session. When
+    /// `None`, falls back to the process-wide `current_dir()`.
+    pub cwd: Option<String>,
+}
+
+/// Drop the ACP session binding for a tab WITHOUT immediately creating a
+/// replacement. Emitted by the Ctrl+C×2 close-pane path when the agent
+/// pane is being hidden on a tab while other tabs still need it: we
+/// release this tab's SessionId so the next prompt on this tab lazily
+/// spawns a fresh session (handled by [`dispatch_prompt_body`]'s
+/// lazy-create branch).
+///
+/// Distinct from [`NewSessionForTab`], which atomically swaps in a new
+/// session — we don't want to pay the new_session round-trip until the
+/// user actually sends a prompt.
+#[derive(Debug, Clone)]
+pub struct DropSessionRequest {
+    pub tab_id: String,
+    /// `false` when WT already published a process-wide reset event that the
+    /// master consumes directly. The helper still clears its local binding
+    /// and cancellation state, but must not race a duplicate physical close.
+    pub notify_master: bool,
+}
+
+/// Rekey the `tab_to_session` binding when WT mints a new stable tab id
+/// for an existing tab (cross-window tab drag — see
+/// `App::rename_tab_session`). The chat-history side rekeys in `app.rs`,
+/// but `tab_to_session` lives in the ACP client task and can't be
+/// rekeyed from `&mut App` directly. Without this, the next prompt on
+/// the dragged tab can't find the old SessionId and falls through to
+/// the lazy-create branch — the agent CLI sees a fresh `session/new`
+/// and loses turn context even though the visible chat is intact.
+///
+/// No-op when `old_tab_id` is absent from the map.
+#[derive(Debug, Clone)]
+pub struct RenameSessionRequest {
+    pub old_tab_id: String,
+    pub new_tab_id: String,
+}
+
+impl PromptSubmission {
+    pub fn new(text: String, pane_context: Option<PaneContext>) -> Self {
+        Self::new_with_kind(text, pane_context, None)
+    }
+
+    pub fn new_autofix(text: String, pane_context: Option<PaneContext>) -> Self {
+        Self::new_with_kind(text, pane_context, Some(AutofixTextKind::UserRequest))
+    }
+
+    pub fn new_autofix_failure(text: String, pane_context: Option<PaneContext>) -> Self {
+        Self::new_with_kind(text, pane_context, Some(AutofixTextKind::FailureSummary))
+    }
+
+    pub fn new_agent_command(text: String, pane_context: Option<PaneContext>) -> Self {
+        let mut prompt = Self::new_with_kind(text, pane_context, None);
+        prompt.agent_command = true;
+        prompt
+    }
+
+    fn new_with_kind(
+        text: String,
+        pane_context: Option<PaneContext>,
+        autofix_text_kind: Option<AutofixTextKind>,
+    ) -> Self {
+        static NEXT_PROMPT_ID: AtomicU64 = AtomicU64::new(1);
+        Self {
+            id: NEXT_PROMPT_ID.fetch_add(1, Ordering::Relaxed),
+            cancellation: CancellationToken::new(),
+            text,
+            pane_context,
+            submitted_at_unix_s: now_unix_s(),
+            autofix_text_kind,
+            agent_command: false,
+            images: Vec::new(),
+            is_byok: false,
+            agent_id: String::new(),
+            reattached_session_id: None,
+        }
+    }
+
+    pub fn is_autofix(&self) -> bool {
+        self.autofix_text_kind.is_some()
+    }
+
+    pub fn is_agent_command(&self) -> bool {
+        self.agent_command
+    }
+
+    pub fn with_byok(mut self, is_byok: bool) -> Self {
+        self.is_byok = is_byok;
+        self
+    }
+
+    pub fn is_byok(&self) -> bool {
+        self.is_byok
+    }
+
+    pub fn with_agent_id(mut self, agent_id: String) -> Self {
+        self.agent_id = agent_id;
+        self
+    }
+
+    pub fn agent_id(&self) -> &str {
+        &self.agent_id
+    }
+
+    pub fn with_reattached_session(mut self, session_id: Option<String>) -> Self {
+        self.reattached_session_id = session_id;
+        self
+    }
+
+    fn was_reattached_at_dispatch(&self, session_id: &str) -> bool {
+        self.reattached_session_id.as_deref() == Some(session_id)
+    }
+
+    pub fn cancellation_token(&self) -> CancellationToken {
+        self.cancellation.clone()
+    }
+
+    /// Attach pasted images (Alt+V) to a human-entered prompt.
+    pub fn with_images(mut self, images: Vec<crate::clipboard_image::PastedImage>) -> Self {
+        self.images = images;
+        self
+    }
+
+    pub fn preview(&self) -> String {
+        prompt_preview(&self.text)
+    }
+}
+
+async fn complete_prompt_request<T>(
+    result: std::result::Result<T, acp::Error>,
+    soft_stop: Option<SoftStopReason>,
+    prompt_timing: &PromptTimingState,
+    event_tx: &mpsc::UnboundedSender<AppEvent>,
+    session_id: String,
+) {
+    match result {
+        Ok(_) => {
+            let timing_note = prompt_timing.complete(&session_id, true, None);
+            if let Some(note) = timing_note {
+                let _ = event_tx.send(AppEvent::TimingMetric {
+                    session_id: session_id.clone(),
+                    note,
+                });
+            }
+            // Defensive workaround for ACP-non-compliant agents.
+            //
+            // ACP requires the Agent to send all pending `session/update`
+            // notifications BEFORE responding to `session/prompt` (see ACP
+            // 0.10 agent.rs:80-101 — `prompt` "Returns when the turn is
+            // complete with a stop reason"). In practice GitHub Copilot
+            // occasionally flushes a few trailing AgentMessageChunk
+            // notifications a few hundred microseconds AFTER the
+            // PromptResponse, which leaves the streaming buffer truncated
+            // when `AgentMessageEnd` triggers `App::turn_close`. We sleep
+            // briefly so the stragglers land in the buffer before the
+            // state machine commits the turn.
+            //
+            // Once Copilot honors the spec, this delay can be removed.
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            let _ = event_tx.send(AppEvent::AgentMessageEnd {
+                session_id: session_id.clone(),
+            });
+            // A successful turn can still end on a soft stop (truncation /
+            // request-budget / refusal). It is NOT a connection failure — the
+            // session stays Connected — so it rides its own event and only
+            // appends an informational line AFTER `AgentMessageEnd` has flushed
+            // the agent's streamed content.
+            if let Some(reason) = soft_stop {
+                let _ = event_tx.send(AppEvent::AgentSoftStop { session_id, reason });
+            }
+        }
+        Err(e) => {
+            let error_message = e.to_string();
+            let failure = AgentFailure::from_acp_error(&e);
+            let timing_note = prompt_timing.complete(&session_id, false, Some(&error_message));
+            if let Some(note) = timing_note {
+                let _ = event_tx.send(AppEvent::TimingMetric {
+                    session_id: session_id.clone(),
+                    note,
+                });
+            }
+            let _ = event_tx.send(AppEvent::AgentError {
+                session_id: Some(session_id),
+                failure,
+                message: format!("prompt error: {}", error_message),
+            });
+        }
+    }
+}
+
+fn acp_log(msg: &str) {
+    tracing::debug!(target: "acp", "{}", msg);
+}
+
+fn acp_error_detail(error: &acp::Error) -> String {
+    error
+        .data
+        .as_ref()
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(&error.message)
+        .to_string()
+}
+
+/// Log potentially-sensitive content (user prompt / agent message text,
+/// previews, full ACP payloads) at **trace only**, so it never lands in
+/// shipping (`info`) or default-troubleshooting (`debug`) logs. Enable with
+/// `WTA_LOG=trace` when a human is deliberately deep-debugging.
+fn acp_trace_content(msg: &str) {
+    tracing::trace!(target: "acp.content", "{}", msg);
+}
+
+#[derive(Clone)]
+struct StartupProbe {
+    begin: std::time::Instant,
+}
+
+impl StartupProbe {
+    fn new() -> Self {
+        Self {
+            begin: std::time::Instant::now(),
+        }
+    }
+
+    fn log(&self, msg: &str) {
+        acp_log(&format!(
+            "{} (t+{:.3}s)",
+            msg,
+            self.begin.elapsed().as_secs_f64()
+        ));
+    }
+}
+
+/// Shared state accessible from the Client trait impl.
+struct ClientState {
+    event_tx: mpsc::UnboundedSender<AppEvent>,
+    shell_mgr: Arc<ShellManager>,
+    prompt_timing: Arc<PromptTimingState>,
+    native_yolo: Arc<super::native_yolo::NativeYoloState>,
+    yolo_state: crate::app_contracts::SharedYoloState,
+    provider_probe_capture: ProviderProbeCapture,
+    standard_usage_sessions: Mutex<HashSet<String>>,
+    proposal_channels: Arc<crate::agent_tools::action_proposal::channel::ProposalChannelManager>,
+    hidden_tool_calls: std::sync::Mutex<HashMap<(String, String), HiddenToolCall>>,
+    origin_scope: std::sync::OnceLock<crate::agent_pane_origin::OriginScope>,
+}
+
+fn record_agent_pane_origin(state: &ClientState, session_id: &str, pane_session_id: Option<&str>) {
+    if let Some(scope) = state.origin_scope.get() {
+        crate::agent_pane_origin::append_default_qualified(scope, session_id, pane_session_id);
+    } else {
+        crate::agent_pane_origin::append_default(session_id, pane_session_id);
+    }
+}
+
+#[derive(Default)]
+struct ProviderProbeCapture {
+    active: Mutex<HashMap<String, String>>,
+}
+
+impl ProviderProbeCapture {
+    fn begin(&self, session_id: &str) -> bool {
+        let mut active = self.active.lock().unwrap();
+        if active.contains_key(session_id) {
+            return false;
+        }
+        active.insert(session_id.to_string(), String::new());
+        true
+    }
+
+    fn capture_text(&self, session_id: &str, text: &str) -> bool {
+        let mut active = self.active.lock().unwrap();
+        let Some(output) = active.get_mut(session_id) else {
+            return false;
+        };
+        output.push_str(text);
+        true
+    }
+
+    fn is_active(&self, session_id: &str) -> bool {
+        self.active.lock().unwrap().contains_key(session_id)
+    }
+
+    fn finish(&self, session_id: &str) -> Option<String> {
+        self.active.lock().unwrap().remove(session_id)
+    }
+}
+
+/// Our Client trait implementation — handles incoming agent requests and notifications.
+#[derive(Clone)]
+struct WtaClient {
+    state: Arc<ClientState>,
+}
+
+struct UserInputUiGuard {
+    event_tx: mpsc::UnboundedSender<AppEvent>,
+    request_id: String,
+    session_id: String,
+    armed: bool,
+}
+
+impl UserInputUiGuard {
+    fn new(
+        event_tx: mpsc::UnboundedSender<AppEvent>,
+        request_id: String,
+        session_id: String,
+    ) -> Self {
+        Self {
+            event_tx,
+            request_id,
+            session_id,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for UserInputUiGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = self.event_tx.send(AppEvent::CancelUserInputRequest {
+                request_id: self.request_id.clone(),
+                session_id: self.session_id.clone(),
+            });
+        }
+    }
+}
+
+/// Maximum characters kept in a tool-call `location` hint before truncation.
+/// Long enough for a typical path or one-line shell command, short enough
+/// that a runaway `raw_input` value (e.g. a full file-edit payload) can't
+/// blow up the chat card into a wall of text.
+const TOOL_CALL_LOCATION_MAX_CHARS: usize = 200;
+const TOOL_CALL_OUTPUT_MAX_CHARS: usize = 4000;
+
+fn tool_call_kind(kind: acp::schema::v1::ToolKind) -> crate::app::ToolCallKind {
+    use crate::app::ToolCallKind as AppKind;
+    use acp::schema::v1::ToolKind;
+
+    match kind {
+        ToolKind::Read => AppKind::Read,
+        ToolKind::Edit => AppKind::Edit,
+        ToolKind::Delete => AppKind::Delete,
+        ToolKind::Move => AppKind::Move,
+        ToolKind::Search => AppKind::Search,
+        ToolKind::Execute => AppKind::Execute,
+        ToolKind::Think => AppKind::Think,
+        ToolKind::Fetch => AppKind::Fetch,
+        ToolKind::SwitchMode => AppKind::SwitchMode,
+        _ => AppKind::Other,
+    }
+}
+
+fn bounded_tool_output_parts<'a>(
+    parts: impl DoubleEndedIterator<Item = &'a str>,
+) -> Option<crate::app::ToolCallOutput> {
+    let mut reversed = String::new();
+    let mut kept_chars = 0;
+    let mut has_content = false;
+    let mut truncated = false;
+
+    'parts: for part in parts.rev().filter(|part| !part.is_empty()) {
+        if has_content {
+            if kept_chars == TOOL_CALL_OUTPUT_MAX_CHARS {
+                truncated = true;
+                break;
+            }
+            reversed.push('\n');
+            kept_chars += 1;
+        }
+        has_content = true;
+        for ch in part.chars().rev() {
+            if kept_chars == TOOL_CALL_OUTPUT_MAX_CHARS {
+                truncated = true;
+                break 'parts;
+            }
+            reversed.push(ch);
+            kept_chars += 1;
+        }
+    }
+
+    has_content.then(|| crate::app::ToolCallOutput {
+        text: reversed.chars().rev().collect(),
+        truncated,
+    })
+}
+
+fn tool_call_content_text(
+    content: &[acp::schema::v1::ToolCallContent],
+) -> Option<crate::app::ToolCallOutput> {
+    bounded_tool_output_parts(content.iter().filter_map(|item| {
+        let acp::schema::v1::ToolCallContent::Content(content) = item else {
+            return None;
+        };
+        let acp::schema::v1::ContentBlock::Text(text) = &content.content else {
+            return None;
+        };
+        Some(text.text.as_str())
+    }))
+}
+
+fn bounded_tool_output(text: &str) -> crate::app::ToolCallOutput {
+    bounded_tool_output_parts(std::iter::once(text)).unwrap_or(crate::app::ToolCallOutput {
+        text: String::new(),
+        truncated: false,
+    })
+}
+
+fn tool_call_content(
+    content: &[acp::schema::v1::ToolCallContent],
+) -> Vec<crate::app::ToolCallContent> {
+    use crate::app::ToolCallContent as AppContent;
+    use acp::schema::v1::{ContentBlock, EmbeddedResourceResource, ToolCallContent};
+
+    content
+        .iter()
+        .map(|item| match item {
+            ToolCallContent::Content(content) => match &content.content {
+                ContentBlock::Text(text) => AppContent::Text(bounded_tool_output(&text.text)),
+                ContentBlock::Image(image) => AppContent::Attachment {
+                    label: image.mime_type.clone(),
+                    uri: image.uri.clone(),
+                },
+                ContentBlock::Audio(audio) => AppContent::Attachment {
+                    label: audio.mime_type.clone(),
+                    uri: None,
+                },
+                ContentBlock::ResourceLink(resource) => AppContent::Attachment {
+                    label: resource
+                        .title
+                        .clone()
+                        .unwrap_or_else(|| resource.name.clone()),
+                    uri: Some(resource.uri.clone()),
+                },
+                ContentBlock::Resource(resource) => match &resource.resource {
+                    EmbeddedResourceResource::TextResourceContents(resource) => {
+                        AppContent::Attachment {
+                            label: resource.uri.clone(),
+                            uri: None,
+                        }
+                    }
+                    EmbeddedResourceResource::BlobResourceContents(resource) => {
+                        AppContent::Attachment {
+                            label: resource
+                                .mime_type
+                                .as_deref()
+                                .map_or_else(|| resource.uri.clone(), str::to_string),
+                            uri: resource.mime_type.as_ref().map(|_| resource.uri.clone()),
+                        }
+                    }
+                    _ => AppContent::Attachment {
+                        label: "?".to_string(),
+                        uri: None,
+                    },
+                },
+                _ => AppContent::Attachment {
+                    label: "?".to_string(),
+                    uri: None,
+                },
+            },
+            ToolCallContent::Diff(diff) => AppContent::Diff {
+                path: diff.path.to_string_lossy().into_owned(),
+                old_text: diff.old_text.as_deref().map(bounded_tool_output),
+                new_text: bounded_tool_output(&diff.new_text),
+            },
+            ToolCallContent::Terminal(terminal) => AppContent::Terminal {
+                id: terminal.terminal_id.to_string(),
+                output: None,
+                exit_code: None,
+            },
+            _ => AppContent::Attachment {
+                label: "?".to_string(),
+                uri: None,
+            },
+        })
+        .collect()
+}
+
+fn tool_call_locations(
+    locations: &[acp::schema::v1::ToolCallLocation],
+) -> Vec<crate::app::ToolCallLocation> {
+    locations
+        .iter()
+        .map(|location| crate::app::ToolCallLocation {
+            path: location.path.to_string_lossy().into_owned(),
+            line: location.line,
+        })
+        .collect()
+}
+
+fn raw_output_text(raw_output: &serde_json::Value) -> Option<crate::app::ToolCallOutput> {
+    if let Some(text) = raw_output.as_str().filter(|text| !text.is_empty()) {
+        return bounded_tool_output_parts(std::iter::once(text));
+    }
+
+    let object = raw_output.as_object()?;
+    let streams = ["stdout", "stderr"]
+        .into_iter()
+        .filter_map(|key| object.get(key)?.as_str())
+        .filter(|text| !text.is_empty());
+    if let Some(output) = bounded_tool_output_parts(streams) {
+        return Some(output);
+    }
+
+    ["output", "text"]
+        .into_iter()
+        .find_map(|key| object.get(key)?.as_str().filter(|text| !text.is_empty()))
+        .and_then(|text| bounded_tool_output_parts(std::iter::once(text)))
+}
+
+fn tool_call_output(
+    content: &[acp::schema::v1::ToolCallContent],
+    raw_output: Option<&serde_json::Value>,
+) -> Option<crate::app::ToolCallOutput> {
+    tool_call_content_text(content).or_else(|| raw_output.and_then(raw_output_text))
+}
+
+fn tool_call_cwd(raw_input: Option<&serde_json::Value>) -> Option<String> {
+    let object = raw_input?.as_object()?;
+    ["cwd", "workingDirectory", "working_directory"]
+        .into_iter()
+        .find_map(|key| object.get(key)?.as_str())
+        .map(str::trim)
+        .filter(|cwd| !cwd.is_empty())
+        .map(str::to_string)
+}
+
+fn tool_call_query(
+    kind: Option<&acp::schema::v1::ToolKind>,
+    raw_input: Option<&serde_json::Value>,
+) -> Option<crate::app::ToolCallOutput> {
+    if kind.is_some_and(|kind| {
+        !matches!(
+            kind,
+            acp::schema::v1::ToolKind::Search | acp::schema::v1::ToolKind::Other
+        )
+    }) {
+        return None;
+    }
+    // Initial calls default to Other and updates can omit kind; Search may arrive later.
+    // Retain only the named query, never arbitrary input JSON.
+    let query = raw_input?.get("query")?.as_str()?;
+    if query.trim().is_empty() {
+        return None;
+    }
+    let mut chars = query.chars();
+    let text = chars.by_ref().take(TOOL_CALL_OUTPUT_MAX_CHARS).collect();
+    Some(crate::app::ToolCallOutput {
+        text,
+        truncated: chars.next().is_some(),
+    })
+}
+
+fn tool_call_exit_code(raw_output: Option<&serde_json::Value>) -> Option<i64> {
+    let object = raw_output?.as_object()?;
+    ["exitCode", "exit_code"]
+        .into_iter()
+        .find_map(|key| object.get(key)?.as_i64())
+}
+
+/// Best-effort extraction of *what* a tool call is touching: a file path
+/// (from `locations`/`raw_input.path`/`raw_input.file_path`), a shell
+/// command (from `raw_input.command`/`commands`), or a sanitized Fetch URL.
+/// Returns
+/// `(text, is_command)` so callers can decide how to render it — a path
+/// reads fine inline, but a command can be long and benefits from its own
+/// code-styled line (see `ChatMessage::ToolCall::location_is_command`,
+/// `PermissionState::target_is_command`).
+///
+/// Falls back to `None` rather than dumping the entire `raw_input` JSON,
+/// which would be noisy and could leak large payloads (e.g. file contents
+/// for a write/edit call) into the chat scrollback.
+fn tool_call_target(
+    kind: Option<&acp::schema::v1::ToolKind>,
+    locations: &[acp::schema::v1::ToolCallLocation],
+    raw_input: Option<&serde_json::Value>,
+) -> Option<(String, bool)> {
+    if let Some(location) = locations
+        .iter()
+        .find(|loc| !loc.path.to_string_lossy().trim().is_empty())
+    {
+        let path = location.path.to_string_lossy().into_owned();
+        let target = location
+            .line
+            .map_or_else(|| path.clone(), |line| format!("{path}:{line}"));
+        return Some((target, false));
+    }
+    let raw_input = raw_input?;
+    if let Some(p) = raw_input
+        .get("path")
+        .or_else(|| raw_input.get("file_path"))
+        .and_then(|v| v.as_str())
+        .filter(|value| !value.trim().is_empty())
+    {
+        return Some((p.to_string(), false));
+    }
+    if let Some(c) = raw_input
+        .get("command")
+        .and_then(|v| v.as_str())
+        .filter(|value| !value.trim().is_empty())
+    {
+        return Some((c.to_string(), true));
+    }
+    if let Some(c) = raw_input
+        .get("commands")
+        .and_then(|v| v.as_array())
+        .and_then(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str())
+                .find(|value| !value.trim().is_empty())
+        })
+    {
+        return Some((c.to_string(), true));
+    }
+    let fetch_target = matches!(kind, Some(acp::schema::v1::ToolKind::Fetch))
+        || (kind.is_none()
+            && ["url", "uri"]
+                .into_iter()
+                .any(|key| raw_input.get(key).is_some()));
+    if fetch_target {
+        let target = ["url", "uri"]
+            .into_iter()
+            .find_map(|key| raw_input.get(key)?.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())?;
+        return sanitize_fetch_target(target).map(|target| (target, false));
+    }
+    None
+}
+
+fn sanitize_fetch_target(target: &str) -> Option<String> {
+    let (scheme, remainder) = target
+        .split_once("://")
+        .map_or(("", target), |(scheme, remainder)| (scheme, remainder));
+    let safe_end = remainder.find(['?', '#']).unwrap_or(remainder.len());
+    let safe = &remainder[..safe_end];
+    let (authority, path) = safe.split_once('/').unwrap_or((safe, ""));
+    let authority = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    if authority.is_empty() {
+        return None;
+    }
+    let separator = if scheme.is_empty() { "" } else { "://" };
+    let path_separator = if path.is_empty() { "" } else { "/" };
+    Some(format!(
+        "{scheme}{separator}{authority}{path_separator}{path}"
+    ))
+}
+
+/// Truncates a `tool_call_target` string to `TOOL_CALL_LOCATION_MAX_CHARS`,
+/// appending `…` when it had to cut.
+fn truncate_target(mut text: String) -> String {
+    if let Some((cut_at, _)) = text.char_indices().nth(TOOL_CALL_LOCATION_MAX_CHARS) {
+        text.truncate(cut_at);
+        text.push('…');
+    }
+    text
+}
+
+/// Best-effort one-line summary of *what* a tool call is touching, shown as
+/// a dim suffix (or, for commands, its own line) under the tool-call title
+/// in the **chat** card (see `ChatMessage::ToolCall::location`). Without
+/// this, cards only ever show the agent's often-generic `title` (e.g.
+/// "Access paths outside trusted directories") with no indication of the
+/// actual file/command involved.
+///
+/// `title` is the card's own title text; when the agent has already baked
+/// the hint into the title itself (common for read/view tool calls, e.g.
+/// title "Viewing C:\...\rust-app" with `locations: [{"path":
+/// "C:\...\rust-app"}]`), appending it again would just print the same
+/// string twice — `"Viewing X (X)"`. In that case we return `None` so the
+/// card shows the title alone. This dedupe is intentionally **not** applied
+/// on the permission dialog (see `request_permission`) — that card is a
+/// decision point, so restating the target explicitly is useful even if
+/// it repeats what a preceding chat tool-call card already showed.
+fn tool_call_location_hint(
+    title: &str,
+    kind: Option<&acp::schema::v1::ToolKind>,
+    locations: &[acp::schema::v1::ToolCallLocation],
+    raw_input: Option<&serde_json::Value>,
+) -> Option<(String, bool)> {
+    let (hint, is_command) = tool_call_target(kind, locations, raw_input)?;
+    let hint = truncate_target(hint);
+    let comparison_hint = hint.strip_suffix('…').unwrap_or(&hint);
+
+    // Don't repeat text the title already contains — case-insensitive so
+    // "Viewing C:\...\rust-app" still dedupes against a locations path that
+    // differs only in case (e.g. drive-letter casing from a different code
+    // path).
+    let fetch_target = matches!(kind, Some(acp::schema::v1::ToolKind::Fetch))
+        || (kind.is_none()
+            && raw_input.is_some_and(|input| {
+                ["url", "uri"]
+                    .into_iter()
+                    .any(|key| input.get(key).is_some())
+            }));
+    if !fetch_target
+        && !title.is_empty()
+        && title
+            .to_lowercase()
+            .contains(&comparison_hint.to_lowercase())
+    {
+        return None;
+    }
+
+    Some((hint, is_command))
+}
+
+/// Short icon glyph for an ACP `ToolKind`, shown next to the title on the
+/// permission dialog (`PermissionState::kind_label`) so "Always allow" has
+/// *some* visual indication of what class of operation it covers — WTA has
+/// no visibility into the agent CLI's actual grant scope (that's entirely
+/// internal to the agent), so this is deliberately just a hint, not a claim
+/// about what "always" will match.
+///
+/// Deliberately a symbol, not an English word ("Read"/"Edit"/…) — this repo
+/// localizes every user-facing string into 85+ locales (see
+/// `rust-localization.instructions.md`), and a kind label is exactly the
+/// kind of ambiguous 1-2-word string that risks mistranslation (e.g.
+/// "Execute" reads as "kill" in several languages). A glyph sidesteps that
+/// entirely while still giving a scannable per-kind visual cue, consistent
+/// with how the rest of the chat UI already uses unlabeled marker glyphs
+/// (bullets, arrows) rather than words.
+///
+/// `None` for kinds with no useful visual framing (`Think`, `SwitchMode`,
+/// `Other`/unset) — the header just shows the title alone.
+fn tool_call_kind_label(kind: Option<&acp::schema::v1::ToolKind>) -> Option<&'static str> {
+    use acp::schema::v1::ToolKind;
+    match kind? {
+        ToolKind::Read | ToolKind::Search | ToolKind::Move => Some("→"),
+        ToolKind::Edit => Some("✎"),
+        ToolKind::Delete => Some("✕"),
+        ToolKind::Execute => Some("$"),
+        ToolKind::Fetch => Some("%"),
+        _ => None,
+    }
+}
+
+fn session_update_kind(update: &acp::schema::v1::SessionUpdate) -> &'static str {
+    match update {
+        acp::schema::v1::SessionUpdate::AgentThoughtChunk(_) => "agent_thought_chunk",
+        acp::schema::v1::SessionUpdate::AgentMessageChunk(_) => "agent_message_chunk",
+        acp::schema::v1::SessionUpdate::ToolCall(_) => "tool_call",
+        acp::schema::v1::SessionUpdate::ToolCallUpdate(_) => "tool_call_update",
+        acp::schema::v1::SessionUpdate::Plan(_) => "plan",
+        acp::schema::v1::SessionUpdate::UsageUpdate(_) => "usage_update",
+        acp::schema::v1::SessionUpdate::AvailableCommandsUpdate(_) => "available_commands_update",
+        _ => "other",
+    }
+}
+
+fn canonical_proposal_permission_command(
+    args: &acp::schema::v1::RequestPermissionRequest,
+) -> Option<&str> {
+    if args.tool_call.fields.kind != Some(acp::schema::v1::ToolKind::Execute) {
+        return None;
+    }
+    let raw_input = args.tool_call.fields.raw_input.as_ref()?.as_object()?;
+    if raw_input.len() != 2 {
+        return None;
+    }
+    let command = raw_input.get("command")?.as_str()?;
+    let commands = raw_input.get("commands")?.as_array()?;
+    (commands.len() == 1 && commands.first()?.as_str()? == command).then_some(command)
+}
+
+fn proposal_permission_command_candidate(
+    args: &acp::schema::v1::RequestPermissionRequest,
+) -> Option<&str> {
+    if args.tool_call.fields.kind != Some(acp::schema::v1::ToolKind::Execute) {
+        return None;
+    }
+    proposal_command_candidate(args.tool_call.fields.raw_input.as_ref())
+}
+
+fn proposal_command_candidate(raw_input: Option<&serde_json::Value>) -> Option<&str> {
+    raw_input?.as_object()?.get("command")?.as_str()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum HiddenToolCall {
+    SessionMcp {
+        tool: SessionMcpTool,
+        server_name: String,
+    },
+    // Hiding legacy proposal commands is not proof of Session MCP identity.
+    Other,
+}
+
+// Diagnostic classification only: never grants permission or logs command contents.
+fn is_command_lookup_permission(command: &str) -> bool {
+    let command = command
+        .trim()
+        .strip_prefix('&')
+        .unwrap_or(command.trim())
+        .trim();
+    // Quoted paths can contain shell metacharacters. Reject operators outside
+    // quotes and command substitution inside double quotes, not single-quoted literals.
+    let mut quote = None;
+    let mut executable_end = None;
+    let mut chars = command.char_indices().peekable();
+    while let Some((index, ch)) = chars.next() {
+        if matches!(ch, '\n' | '\r')
+            || (quote != Some('\'')
+                && (ch == '`' || (ch == '$' && chars.peek().is_some_and(|(_, next)| *next == '('))))
+        {
+            return false;
+        }
+        if let Some(delimiter) = quote {
+            if ch == delimiter {
+                if chars.peek().is_some_and(|(_, next)| *next == delimiter) {
+                    chars.next();
+                } else {
+                    quote = None;
+                }
+            }
+            continue;
+        }
+        match ch {
+            '\'' | '"' => quote = Some(ch),
+            ';' | '|' | '&' | '>' | '<' | '(' | ')' | '{' | '}' => return false,
+            ch if ch.is_whitespace() => {
+                executable_end.get_or_insert(index);
+            }
+            _ => {}
+        }
+    }
+    if quote.is_some() {
+        return false;
+    }
+    let Some(end) = executable_end else {
+        return false;
+    };
+    let (executable, rest) = command.split_at(end);
+    let executable = if let Some(quote) = executable
+        .chars()
+        .next()
+        .filter(|c| *c == '"' || *c == '\'')
+    {
+        let Some(executable) = executable[1..].strip_suffix(quote) else {
+            return false;
+        };
+        executable
+    } else {
+        executable
+    };
+    let executable = executable.rsplit(['\\', '/']).next().unwrap_or(executable);
+    (executable.eq_ignore_ascii_case("wta")
+        || executable.eq_ignore_ascii_case("wta.exe")
+        || executable.eq_ignore_ascii_case("$env:WTA_CLI_PATH")
+        || executable == "$WTA_CLI_PATH")
+        && rest.split_whitespace().next() == Some("resolve-command")
+}
+
+#[test]
+fn command_lookup_permission_diagnostic_requires_an_invocation() {
+    for command in [
+        "wta resolve-command gti",
+        "& \"$env:WTA_CLI_PATH\" resolve-command gti",
+        "\"C:\\Program Files\\IT\\wta.exe\" resolve-command gti",
+    ] {
+        assert!(is_command_lookup_permission(command), "{command}");
+    }
+    for command in [
+        "echo resolve-command",
+        "wta run-command resolve-command",
+        "other.exe resolve-command gti",
+        "wta resolve-command-history",
+        "wta resolve-command gti; unrelated-command",
+        "wta resolve-command $(unrelated-command)",
+        "wta resolve-command gti | unrelated-command",
+        "'unterminated",
+    ] {
+        assert!(!is_command_lookup_permission(command), "{command}");
+    }
+}
+
+#[test]
+fn command_lookup_permission_preserves_quoted_path_literals() {
+    for command in [
+        r#"& 'wta.exe' resolve-command gti --cwd 'C:\R&D\src' --json"#,
+        r#"& "C:\R&D tools\wta.exe" resolve-command gti --cwd "C:\R&D\src""#,
+        r#"& 'wta.exe' resolve-command gti --cwd 'C:\src;archive' --json"#,
+        r#"& 'C:\owner''s\R&D\wta.exe' resolve-command gti --cwd 'C:\owner''s\src'"#,
+        r#"& 'wta.exe' resolve-command gti --cwd "C:\owner's\R&D""#,
+        r#"& 'wta.exe' resolve-command gti --cwd 'C:\$(archive)&src' --json"#,
+        r#"& 'wta.exe' resolve-command gti --cwd 'C:\src`archive' --json"#,
+    ] {
+        assert!(is_command_lookup_permission(command), "{command}");
+    }
+}
+
+#[test]
+fn command_lookup_permission_rejects_expressions_and_unbalanced_quotes() {
+    for command in [
+        r#"& 'wta.exe' resolve-command gti --cwd 'C:\R&D' & unrelated-command"#,
+        r#"& 'wta.exe' resolve-command gti --cwd "C:\R&D"; unrelated-command"#,
+        r#"& 'wta.exe' resolve-command gti --cwd 'C:\R&D' | unrelated-command"#,
+        r#"& 'wta.exe' resolve-command gti --cwd "$(unrelated-command)""#,
+        r#"& 'wta.exe' resolve-command (unrelated-command)"#,
+        r#"& 'wta.exe' resolve-command gti --cwd 'C:\owner''s"#,
+        r#"& 'wta.exe' resolve-command gti --cwd "C:\R&D"#,
+        concat!("& 'wta.exe'", "resolve-command gti"),
+        "wta resolve-command gti\nunrelated-command",
+        "wta resolve-command gti > output.txt",
+    ] {
+        assert!(!is_command_lookup_permission(command), "{command}");
+    }
+}
+
+fn looks_like_proposal_command(command: &str) -> bool {
+    fn segment_invokes_proposal(segment: &str) -> bool {
+        let segment = segment.trim_start();
+        let segment = segment
+            .strip_prefix('&')
+            .map(str::trim_start)
+            .unwrap_or(segment);
+        let mut words = segment.split_whitespace();
+        let Some(executable) = words.next() else {
+            return false;
+        };
+        let executable = executable.trim_matches(['"', '\'']);
+        let executable_name = executable.rsplit(['\\', '/']).next().unwrap_or(executable);
+        let is_wta = executable.eq_ignore_ascii_case("$env:WTA_CLI_PATH")
+            || executable_name.eq_ignore_ascii_case("wta")
+            || executable_name.eq_ignore_ascii_case("wta.exe");
+        is_wta && words.next() == Some("propose-terminal-actions")
+    }
+
+    let mut segment_start = 0;
+    let mut quote = None;
+    let mut chars = command.char_indices().peekable();
+    while let Some((index, ch)) = chars.next() {
+        if ch == '`' && quote != Some('\'') {
+            chars.next();
+            continue;
+        }
+        if let Some(delimiter) = quote {
+            if ch == delimiter {
+                if delimiter == '\'' && chars.peek().is_some_and(|(_, next)| *next == '\'') {
+                    chars.next();
+                } else {
+                    quote = None;
+                }
+            }
+            continue;
+        }
+        if ch == '\'' || ch == '"' {
+            quote = Some(ch);
+            continue;
+        }
+
+        let separator_len = if matches!(ch, '|' | ';' | '\r' | '\n') {
+            ch.len_utf8()
+        } else if ch == '&' && chars.peek().is_some_and(|(_, next)| *next == '&') {
+            chars.next();
+            2
+        } else {
+            continue;
+        };
+        if segment_invokes_proposal(&command[segment_start..index]) {
+            return true;
+        }
+        segment_start = index + separator_len;
+    }
+    segment_invokes_proposal(&command[segment_start..])
+}
+
+impl WtaClient {
+    async fn dispatch_session_notification(&self, args: acp::schema::v1::SessionNotification) {
+        let usage_session_id =
+            matches!(&args.update, acp::schema::v1::SessionUpdate::UsageUpdate(_))
+                .then(|| args.session_id.0.to_string());
+
+        if self.session_notification(args).await.is_err() {
+            if let Some(session_id) = usage_session_id {
+                tracing::warn!(
+                    target: "usage",
+                    schema = ACP_SESSION_USAGE_SCHEMA,
+                    source = "acp_standard",
+                    outcome = "rejected",
+                    "usage update rejected"
+                );
+                let _ = self
+                    .state
+                    .event_tx
+                    .send(AppEvent::UsageCleared { session_id });
+            }
+        }
+    }
+
+    fn hide_tool_call(&self, session_id: &str, tool_call_id: &str, tool: HiddenToolCall) {
+        let previous = self.state.hidden_tool_calls.lock().unwrap().insert(
+            (session_id.to_string(), tool_call_id.to_string()),
+            tool.clone(),
+        );
+        if previous.as_ref() == Some(&tool) {
+            return;
+        }
+        let _ = self.state.event_tx.send(AppEvent::HideToolCall {
+            session_id: session_id.to_string(),
+            id: tool_call_id.to_string(),
+        });
+    }
+
+    fn hidden_tool_call(&self, session_id: &str, tool_call_id: &str) -> Option<HiddenToolCall> {
+        self.state
+            .hidden_tool_calls
+            .lock()
+            .unwrap()
+            .get(&(session_id.to_string(), tool_call_id.to_string()))
+            .cloned()
+    }
+
+    fn session_mcp_tool(
+        &self,
+        session_id: &str,
+        tool_call_id: &str,
+        title: Option<&str>,
+        server_name: Option<&str>,
+    ) -> Option<SessionMcpTool> {
+        // Master overwrites this identity on every forwarded permission/update.
+        // Correlation is valid only for that exact, currently bound server.
+        server_name
+            .and_then(|name| SessionMcpTool::from_title(title, name))
+            .or_else(|| {
+                let key = (session_id.to_string(), tool_call_id.to_string());
+                let mut calls = self.state.hidden_tool_calls.lock().unwrap();
+                match calls.get(&key) {
+                    Some(HiddenToolCall::SessionMcp {
+                        tool,
+                        server_name: previous,
+                    }) if Some(previous.as_str()) == server_name
+                        && title.is_none_or(|title| title.trim() == tool.name()) =>
+                    {
+                        Some(*tool)
+                    }
+                    Some(HiddenToolCall::SessionMcp { .. }) => {
+                        calls.remove(&key);
+                        None
+                    }
+                    _ => None,
+                }
+            })
+    }
+
+    async fn request_permission(
+        &self,
+        args: acp::schema::v1::RequestPermissionRequest,
+    ) -> acp::Result<acp::schema::v1::RequestPermissionResponse> {
+        acp_log("request_permission received");
+        // Tool-call title is agent-generated content — trace only.
+        acp_trace_content(&format!(
+            "request_permission title: {:?}",
+            args.tool_call.fields.title
+        ));
+        let session_id = args.session_id.0.to_string();
+        let tool_call_id = args.tool_call.tool_call_id.to_string();
+        let proposal_candidate = proposal_permission_command_candidate(&args);
+        let server_name = server_identity(args.meta.as_ref());
+        let session_mcp_tool = self.session_mcp_tool(
+            &session_id,
+            &tool_call_id,
+            args.tool_call.fields.title.as_deref(),
+            server_name,
+        );
+        if let Some((tool, server_name)) = session_mcp_tool.zip(server_name) {
+            self.hide_tool_call(
+                &session_id,
+                &tool_call_id,
+                HiddenToolCall::SessionMcp {
+                    tool,
+                    server_name: server_name.to_string(),
+                },
+            );
+        } else if proposal_candidate.is_some_and(looks_like_proposal_command) {
+            self.hide_tool_call(&session_id, &tool_call_id, HiddenToolCall::Other);
+        }
+        let title = args
+            .tool_call
+            .fields
+            .title
+            .clone()
+            .unwrap_or_else(|| "Permission requested".to_string());
+        let kind_label = tool_call_kind_label(args.tool_call.fields.kind.as_ref());
+        // Unlike the chat tool-call card, the permission dialog never
+        // dedupes the target against the title — it's a decision point,
+        // so restating exactly what path/command is involved is
+        // intentional even if it repeats a preceding tool-call card.
+        let target_hint = tool_call_target(
+            args.tool_call.fields.kind.as_ref(),
+            args.tool_call.fields.locations.as_deref().unwrap_or(&[]),
+            args.tool_call.fields.raw_input.as_ref(),
+        )
+        .map(|(text, is_command)| (truncate_target(text), is_command));
+        // Fallback single-line text for the compact (1-row) card — see
+        // `PermissionState::description`.
+        let description = match &target_hint {
+            Some((target, _)) => format!("{title} ({target})"),
+            None => title.clone(),
+        };
+        self.state
+            .prompt_timing
+            .permission_requested(&session_id, &description);
+
+        if let Some(tool) = session_mcp_tool {
+            let permission_result = match tool {
+                SessionMcpTool::TerminalAction(_) => self
+                    .state
+                    .proposal_channels
+                    .validate_mcp_permission(&session_id),
+                SessionMcpTool::UserInput => Ok(()),
+            };
+            tracing::info!(
+                target: "session_mcp_permission",
+                session_id = %session_id,
+                tool = tool.name(),
+                validated = permission_result.is_ok(),
+                status = ?permission_result.as_ref().err().map(|failure| failure.status),
+                "validating session MCP permission"
+            );
+            if permission_result.is_err() {
+                self.state
+                    .prompt_timing
+                    .permission_resolved(&session_id, "session_mcp_permission_rejected");
+                return Ok(acp::schema::v1::RequestPermissionResponse::new(
+                    acp::schema::v1::RequestPermissionOutcome::Cancelled,
+                ));
+            }
+        }
+
+        if let Some(command) = canonical_proposal_permission_command(&args) {
+            match crate::agent_tools::action_proposal::invocation::parse(command) {
+                Ok(invocation) => {
+                    let permission_result = self
+                        .state
+                        .proposal_channels
+                        .validate_permission(&session_id, &invocation.channel);
+                    tracing::info!(
+                        target: "proposal_permission",
+                        session_id = %session_id,
+                        validated = permission_result.is_ok(),
+                        status = ?permission_result.as_ref().err().map(|failure| failure.status),
+                        "validating canonical proposal permission before user selection"
+                    );
+                    if permission_result.is_err() {
+                        self.state
+                            .prompt_timing
+                            .permission_resolved(&session_id, "proposal_permission_rejected");
+                        return Ok(acp::schema::v1::RequestPermissionResponse::new(
+                            acp::schema::v1::RequestPermissionOutcome::Cancelled,
+                        ));
+                    }
+                }
+                Err(reason) if looks_like_proposal_command(command) => {
+                    tracing::info!(
+                        target: "proposal_permission",
+                        session_id = %session_id,
+                        reason,
+                        "silently cancelled non-canonical proposal command"
+                    );
+                    self.state
+                        .prompt_timing
+                        .permission_resolved(&session_id, "proposal_noncanonical");
+                    return Ok(acp::schema::v1::RequestPermissionResponse::new(
+                        acp::schema::v1::RequestPermissionOutcome::Cancelled,
+                    ));
+                }
+                Err(_) => {}
+            }
+        } else if proposal_candidate.is_some_and(looks_like_proposal_command) {
+            self.state
+                .prompt_timing
+                .permission_resolved(&session_id, "proposal_noncanonical");
+            return Ok(acp::schema::v1::RequestPermissionResponse::new(
+                acp::schema::v1::RequestPermissionOutcome::Cancelled,
+            ));
+        }
+
+        if let Some(tool) = session_mcp_tool {
+            // The MCP handler still validates the request and presents the action
+            // card or question. Only skip this duplicate, invocation-scoped prompt.
+            if let Some(option) = args.options.iter().find(|option| {
+                matches!(
+                    option.kind,
+                    acp::schema::v1::PermissionOptionKind::AllowOnce
+                )
+            }) {
+                tracing::info!(
+                    target: "session_mcp_permission",
+                    session_id = %session_id,
+                    tool = tool.name(),
+                    "auto-approved Session MCP invocation; helper confirmation still required"
+                );
+                self.state
+                    .prompt_timing
+                    .permission_resolved(&session_id, "session_mcp_auto_approved");
+                return Ok(acp::schema::v1::RequestPermissionResponse::new(
+                    acp::schema::v1::RequestPermissionOutcome::Selected(
+                        acp::schema::v1::SelectedPermissionOutcome::new(option.option_id.clone()),
+                    ),
+                ));
+            }
+            tracing::info!(
+                target: "session_mcp_permission",
+                session_id = %session_id,
+                tool = tool.name(),
+                "Session MCP permission has no AllowOnce option; awaiting user selection"
+            );
+        }
+
+        let options: Vec<PermOption> = args
+            .options
+            .iter()
+            .map(|o| PermOption {
+                id: o.option_id.to_string(),
+                name: o.name.clone(),
+                kind: format!("{:?}", o.kind),
+            })
+            .collect();
+
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+
+        tracing::info!(
+            target: "permission_ui",
+            request = %serde_json::json!({
+                "session_id": session_id,
+                "tool_call_id": tool_call_id,
+                "kind": if matches!(session_mcp_tool, Some(SessionMcpTool::TerminalAction(_))) {
+                    "session_mcp"
+                } else if target_hint.as_ref().is_some_and(|(command, is_command)| {
+                    *is_command && is_command_lookup_permission(command)
+                }) {
+                    "command_lookup"
+                } else {
+                    "other"
+                },
+            }),
+            "permission queued for user selection"
+        );
+
+        let (target, target_is_command) = match target_hint {
+            Some((text, is_command)) => (Some(text), is_command),
+            None => (None, false),
+        };
+        let _ = self.state.event_tx.send(AppEvent::PermissionRequest {
+            session_id: session_id.clone(),
+            tool_call_id,
+            description,
+            title,
+            kind_label: kind_label.map(str::to_string),
+            target,
+            target_is_command,
+            options,
+            responder: resp_tx,
+        });
+
+        // Wait for user to choose
+        match resp_rx.await {
+            Ok(option_id) => {
+                self.state
+                    .prompt_timing
+                    .permission_resolved(&session_id, "selected");
+                Ok(acp::schema::v1::RequestPermissionResponse::new(
+                    acp::schema::v1::RequestPermissionOutcome::Selected(
+                        acp::schema::v1::SelectedPermissionOutcome::new(option_id),
+                    ),
+                ))
+            }
+            Err(_) => {
+                self.state
+                    .prompt_timing
+                    .permission_resolved(&session_id, "cancelled");
+                Ok(acp::schema::v1::RequestPermissionResponse::new(
+                    acp::schema::v1::RequestPermissionOutcome::Cancelled,
+                ))
+            }
+        }
+    }
+
+    async fn session_notification(
+        &self,
+        args: acp::schema::v1::SessionNotification,
+    ) -> acp::Result<()> {
+        let server_name = server_identity(args.meta.as_ref());
+        let kind = session_update_kind(&args.update);
+        let session_id = args.session_id.clone();
+        let sid = args.session_id.0.to_string();
+        if self.state.provider_probe_capture.is_active(&sid) {
+            if let acp::schema::v1::SessionUpdate::AgentMessageChunk(chunk) = &args.update {
+                if let acp::schema::v1::ContentBlock::Text(text_content) = &chunk.content {
+                    self.state
+                        .provider_probe_capture
+                        .capture_text(&sid, &text_content.text);
+                }
+                return Ok(());
+            }
+            if !matches!(args.update, acp::schema::v1::SessionUpdate::UsageUpdate(_)) {
+                return Ok(());
+            }
+        }
+        // Per-streamed-chunk; trace-only (not via acp_log's debug) so default
+        // debug logs aren't flooded with one line per token chunk.
+        tracing::trace!(target: "acp", "session_notification: kind={}", kind);
+        // The full update carries agent message/thought text, tool-call
+        // content, plan bodies, and replayed user-message chunks — trace only.
+        // Usage values remain redacted even at trace level.
+        if kind != "usage_update" {
+            acp_trace_content(&format!("session_notification update: {:?}", args.update));
+        }
+        self.state.prompt_timing.observe_session_update(&sid, kind);
+        match args.update {
+            acp::schema::v1::SessionUpdate::UserMessageChunk(chunk) => {
+                // Replayed historical user prompt from `session/load`.
+                // In the normal prompt flow the agent doesn't emit
+                // these (the client sent the user text itself), so
+                // this branch only fires during a load replay. The
+                // App handler gates on `loading_session` and drops
+                // late-arrivers.
+                let message_id = chunk.message_id.map(|id| id.to_string());
+                if let acp::schema::v1::ContentBlock::Text(text_content) = chunk.content {
+                    let _ = self.state.event_tx.send(AppEvent::UserMessageReplayChunk {
+                        session_id: sid,
+                        message_id,
+                        text: text_content.text,
+                    });
+                }
+            }
+            acp::schema::v1::SessionUpdate::AgentThoughtChunk(chunk) => {
+                if let acp::schema::v1::ContentBlock::Text(text_content) = chunk.content {
+                    if !text_content.text.trim().is_empty() {
+                        self.state
+                            .prompt_timing
+                            .observe_first_text(&sid, text_content.text.len());
+                    }
+                    let _ = self.state.event_tx.send(AppEvent::AgentThoughtChunk {
+                        session_id: sid,
+                        text: text_content.text,
+                    });
+                }
+            }
+            acp::schema::v1::SessionUpdate::AgentMessageChunk(chunk) => {
+                if let acp::schema::v1::ContentBlock::Text(text_content) = chunk.content {
+                    self.state
+                        .prompt_timing
+                        .observe_first_text(&sid, text_content.text.len());
+                    let _ = self.state.event_tx.send(AppEvent::AgentMessageChunk {
+                        session_id: sid,
+                        text: text_content.text,
+                    });
+                }
+            }
+            acp::schema::v1::SessionUpdate::ToolCall(tool_call) => {
+                let tool_call_id = tool_call.tool_call_id.to_string();
+                if let Some((tool, server_name)) = self
+                    .session_mcp_tool(&sid, &tool_call_id, Some(&tool_call.title), server_name)
+                    .zip(server_name)
+                {
+                    self.hide_tool_call(
+                        &sid,
+                        &tool_call_id,
+                        HiddenToolCall::SessionMcp {
+                            tool,
+                            server_name: server_name.to_string(),
+                        },
+                    );
+                    return Ok(());
+                }
+                if proposal_command_candidate(tool_call.raw_input.as_ref())
+                    .is_some_and(looks_like_proposal_command)
+                {
+                    self.hide_tool_call(&sid, &tool_call_id, HiddenToolCall::Other);
+                    return Ok(());
+                }
+                if matches!(
+                    self.hidden_tool_call(&sid, &tool_call_id),
+                    Some(HiddenToolCall::Other)
+                ) {
+                    return Ok(());
+                }
+                self.state
+                    .prompt_timing
+                    .observe_first_tool_call(&sid, Some(tool_call.title.as_str()));
+                let (location, location_is_command) = match tool_call_location_hint(
+                    &tool_call.title,
+                    Some(&tool_call.kind),
+                    &tool_call.locations,
+                    tool_call.raw_input.as_ref(),
+                ) {
+                    Some((text, is_command)) => (Some(text), is_command),
+                    None => (None, false),
+                };
+                let _ = self.state.event_tx.send(AppEvent::ToolCall {
+                    session_id: sid,
+                    id: tool_call_id,
+                    title: tool_call.title.clone(),
+                    status: format!("{:?}", tool_call.status),
+                    kind: tool_call_kind(tool_call.kind),
+                    query: tool_call_query(Some(&tool_call.kind), tool_call.raw_input.as_ref()),
+                    location,
+                    location_is_command,
+                    cwd: tool_call_cwd(tool_call.raw_input.as_ref()),
+                    output: tool_call_output(&tool_call.content, tool_call.raw_output.as_ref()),
+                    exit_code: tool_call_exit_code(tool_call.raw_output.as_ref()),
+                    content: tool_call_content(&tool_call.content),
+                    locations: tool_call_locations(&tool_call.locations),
+                });
+            }
+            acp::schema::v1::SessionUpdate::ToolCallUpdate(update) => {
+                let tool_call_id = update.tool_call_id.to_string();
+                if let Some((tool, server_name)) = self
+                    .session_mcp_tool(
+                        &sid,
+                        &tool_call_id,
+                        update.fields.title.as_deref(),
+                        server_name,
+                    )
+                    .zip(server_name)
+                {
+                    self.hide_tool_call(
+                        &sid,
+                        &tool_call_id,
+                        HiddenToolCall::SessionMcp {
+                            tool,
+                            server_name: server_name.to_string(),
+                        },
+                    );
+                    return Ok(());
+                }
+                if proposal_command_candidate(update.fields.raw_input.as_ref())
+                    .is_some_and(looks_like_proposal_command)
+                {
+                    self.hide_tool_call(&sid, &tool_call_id, HiddenToolCall::Other);
+                    return Ok(());
+                }
+                if matches!(
+                    self.hidden_tool_call(&sid, &tool_call_id),
+                    Some(HiddenToolCall::Other)
+                ) {
+                    return Ok(());
+                }
+                // Failed updates frequently carry a `raw_output.message`
+                // explaining why. Keep that concise reason in the status
+                // while also forwarding any reported output independently.
+                let status = update.fields.status.as_ref().map(|status| {
+                    let reason = update
+                        .fields
+                        .raw_output
+                        .as_ref()
+                        .and_then(|v| v.get("message"))
+                        .and_then(|m| m.as_str())
+                        .map(str::trim)
+                        .filter(|message| !message.is_empty());
+                    match reason {
+                        Some(message)
+                            if matches!(status, acp::schema::v1::ToolCallStatus::Failed) =>
+                        {
+                            format!("{:?}: {}", status, message)
+                        }
+                        _ => format!("{:?}", status),
+                    }
+                });
+                // Collections in ACP updates replace their previous value.
+                // An empty content collection therefore emits an empty output
+                // patch so the reducer clears stale text.
+                let output = if let Some(content) = &update.fields.content {
+                    Some(
+                        tool_call_content_text(content)
+                            .or_else(|| update.fields.raw_output.as_ref().and_then(raw_output_text))
+                            .unwrap_or(crate::app::ToolCallOutput {
+                                text: String::new(),
+                                truncated: false,
+                            }),
+                    )
+                } else {
+                    update.fields.raw_output.as_ref().and_then(raw_output_text)
+                };
+                let (location, location_is_command) =
+                    if update.fields.locations.is_some() || update.fields.raw_input.is_some() {
+                        match tool_call_location_hint(
+                            update.fields.title.as_deref().unwrap_or(""),
+                            update.fields.kind.as_ref(),
+                            update.fields.locations.as_deref().unwrap_or(&[]),
+                            update.fields.raw_input.as_ref(),
+                        ) {
+                            Some((text, is_command)) => (Some(text), is_command),
+                            None => (None, false),
+                        }
+                    } else {
+                        (None, false)
+                    };
+                let cwd = tool_call_cwd(update.fields.raw_input.as_ref());
+                let query = tool_call_query(
+                    update.fields.kind.as_ref(),
+                    update.fields.raw_input.as_ref(),
+                );
+                let exit_code = tool_call_exit_code(update.fields.raw_output.as_ref());
+                let content = update.fields.content.as_deref().map(tool_call_content);
+                let locations = update.fields.locations.as_deref().map(tool_call_locations);
+                if update.fields.title.is_some()
+                    || status.is_some()
+                    || update.fields.kind.is_some()
+                    || location.is_some()
+                    || output.is_some()
+                    || cwd.is_some()
+                    || exit_code.is_some()
+                    || content.is_some()
+                    || locations.is_some()
+                    || query.is_some()
+                {
+                    let _ = self.state.event_tx.send(AppEvent::ToolCallUpdate {
+                        session_id: sid,
+                        id: tool_call_id,
+                        title: update.fields.title,
+                        status,
+                        kind: update.fields.kind.map(tool_call_kind),
+                        query,
+                        location,
+                        location_is_command,
+                        output,
+                        content,
+                        locations,
+                        cwd,
+                        exit_code,
+                    });
+                }
+            }
+            acp::schema::v1::SessionUpdate::Plan(plan) => {
+                let entries = plan
+                    .entries
+                    .iter()
+                    .map(|e| PlanEntry {
+                        content: e.content.clone(),
+                        status: match e.status {
+                            acp::schema::v1::PlanEntryStatus::Completed => {
+                                PlanEntryStatus::Completed
+                            }
+                            acp::schema::v1::PlanEntryStatus::InProgress => {
+                                PlanEntryStatus::InProgress
+                            }
+                            _ => PlanEntryStatus::Pending,
+                        },
+                    })
+                    .collect();
+                let _ = self.state.event_tx.send(AppEvent::Plan {
+                    session_id: sid,
+                    entries,
+                });
+            }
+            acp::schema::v1::SessionUpdate::UsageUpdate(update) => {
+                self.state
+                    .standard_usage_sessions
+                    .lock()
+                    .unwrap()
+                    .insert(sid.clone());
+                let snapshot = crate::usage::normalize_standard_usage(&update);
+                let _ = self.state.event_tx.send(AppEvent::UsageReported {
+                    session_id: sid,
+                    snapshot,
+                });
+            }
+            acp::schema::v1::SessionUpdate::CurrentModeUpdate(update) => {
+                self.state
+                    .native_yolo
+                    .record_current_mode(&session_id, update.current_mode_id.0.as_ref());
+            }
+            acp::schema::v1::SessionUpdate::AvailableCommandsUpdate(update) => {
+                let commands =
+                    crate::protocol::acp::session_commands::normalize(&update.available_commands);
+                let _ = self.state.event_tx.send(AppEvent::SessionCommandsUpdated {
+                    session_id: sid,
+                    commands,
+                });
+            }
+            acp::schema::v1::SessionUpdate::ConfigOptionUpdate(update) => {
+                self.state
+                    .native_yolo
+                    .record_from_config_update(&session_id, &update.config_options);
+                let (available_models, current_model_id) =
+                    crate::protocol::acp::model_select::models_from_config_options(
+                        &sid,
+                        &update.config_options,
+                    )
+                    .unwrap_or_default();
+                publish_session_config_options(
+                    &self.state.event_tx,
+                    &self.state.native_yolo,
+                    &session_id,
+                    Some(&update.config_options),
+                );
+                let _ = self.state.event_tx.send(AppEvent::ModelConfigUpdated {
+                    session_id: sid,
+                    available_models,
+                    current_model_id,
+                });
+            }
+            _ => {} // Ignore other update types for now
+        }
+        Ok(())
+    }
+
+    async fn create_terminal(
+        &self,
+        args: acp::schema::v1::CreateTerminalRequest,
+    ) -> acp::Result<acp::schema::v1::CreateTerminalResponse> {
+        acp_log(&format!(
+            "create_terminal called: arg_count={}",
+            args.args.len()
+        ));
+        // Agent-requested command line can carry user/file content — trace only.
+        acp_trace_content(&format!(
+            "create_terminal cmd={} args={:?}",
+            args.command, args.args
+        ));
+        let env: Vec<(String, String)> = args
+            .env
+            .iter()
+            .map(|e| (e.name.clone(), e.value.clone()))
+            .collect();
+        let cwd = args.cwd.as_ref().map(|p| p.to_string_lossy().to_string());
+
+        let config = TerminalConfig {
+            command: args.command.clone(),
+            args: args.args.clone(),
+            cwd,
+            env,
+        };
+
+        let session_id = args.session_id.0.to_string();
+        let title = format!("{} {}", args.command, args.args.join(" "));
+        // Working directory doubles as this card's location hint — the
+        // title already has the full command line, but `cwd` is otherwise
+        // shown nowhere and is useful context for a relative-path command.
+        // Skip it if the command line already names that directory, to
+        // avoid printing the same path twice on one line.
+        let location = args
+            .cwd
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string())
+            .filter(|cwd| !title.to_lowercase().contains(&cwd.to_lowercase()));
+        match self.state.shell_mgr.create_terminal(config).await {
+            Ok(id) => {
+                // Show tool-call-like feedback
+                let _ = self.state.event_tx.send(AppEvent::ToolCall {
+                    session_id,
+                    id: id.clone(),
+                    title,
+                    status: "running".to_string(),
+                    kind: crate::app::ToolCallKind::Execute,
+                    query: None,
+                    location,
+                    location_is_command: false,
+                    cwd: None,
+                    output: None,
+                    exit_code: None,
+                    content: Vec::new(),
+                    locations: Vec::new(),
+                });
+                Ok(acp::schema::v1::CreateTerminalResponse::new(id))
+            }
+            Err(e) => Err(acp::Error::internal_error().data(e.to_string())),
+        }
+    }
+
+    async fn terminal_output(
+        &self,
+        args: acp::schema::v1::TerminalOutputRequest,
+    ) -> acp::Result<acp::schema::v1::TerminalOutputResponse> {
+        match self
+            .state
+            .shell_mgr
+            .get_output(&args.terminal_id.to_string())
+            .await
+        {
+            Ok(output) => {
+                let terminal_id = args.terminal_id.to_string();
+                let session_id = args.session_id.0.to_string();
+                let app_output = bounded_tool_output(&output.data);
+                let exit_code = output.exit_status.map(i64::from);
+                let _ = self.state.event_tx.send(AppEvent::ToolTerminalOutput {
+                    session_id,
+                    terminal_id,
+                    output: app_output,
+                    exit_code,
+                });
+                let mut resp = acp::schema::v1::TerminalOutputResponse::new(output.data, false);
+                if let Some(code) = output.exit_status {
+                    resp = resp
+                        .exit_status(acp::schema::v1::TerminalExitStatus::new().exit_code(code));
+                }
+                Ok(resp)
+            }
+            Err(e) => Err(acp::Error::internal_error().data(e.to_string())),
+        }
+    }
+
+    async fn wait_for_terminal_exit(
+        &self,
+        args: acp::schema::v1::WaitForTerminalExitRequest,
+    ) -> acp::Result<acp::schema::v1::WaitForTerminalExitResponse> {
+        let tid = args.terminal_id.to_string();
+        let session_id = args.session_id.0.to_string();
+
+        match self.state.shell_mgr.wait_for_exit(&tid).await {
+            Ok(code) => {
+                // Update tool call status
+                let _ = self.state.event_tx.send(AppEvent::ToolCallUpdate {
+                    session_id,
+                    id: tid,
+                    title: None,
+                    status: Some(format!("exited ({})", code)),
+                    kind: None,
+                    query: None,
+                    location: None,
+                    location_is_command: false,
+                    output: None,
+                    content: None,
+                    locations: None,
+                    cwd: None,
+                    exit_code: Some(i64::from(code)),
+                });
+                Ok(acp::schema::v1::WaitForTerminalExitResponse::new(
+                    acp::schema::v1::TerminalExitStatus::new().exit_code(code),
+                ))
+            }
+            Err(e) => Err(acp::Error::internal_error().data(e.to_string())),
+        }
+    }
+
+    async fn release_terminal(
+        &self,
+        args: acp::schema::v1::ReleaseTerminalRequest,
+    ) -> acp::Result<acp::schema::v1::ReleaseTerminalResponse> {
+        let _ = self
+            .state
+            .shell_mgr
+            .release(&args.terminal_id.to_string())
+            .await;
+        Ok(acp::schema::v1::ReleaseTerminalResponse::new())
+    }
+
+    async fn kill_terminal(
+        &self,
+        args: acp::schema::v1::KillTerminalRequest,
+    ) -> acp::Result<acp::schema::v1::KillTerminalResponse> {
+        let _ = self
+            .state
+            .shell_mgr
+            .kill(&args.terminal_id.to_string())
+            .await;
+        Ok(acp::schema::v1::KillTerminalResponse::new())
+    }
+
+    async fn request_terminal_actions(
+        &self,
+        args: acp::schema::v1::ExtRequest,
+    ) -> acp::Result<acp::schema::v1::ExtResponse> {
+        use crate::agent_tools::action_proposal::channel::{
+            ProposalFinalStatus, ProposalValidationStatus,
+        };
+        use crate::agent_tools::action_proposal::pipe::{
+            ProposalPayloadSource, ProposalValidationDecision, ProposalValidationResponse,
+            ValidationPhase,
+        };
+
+        let request: crate::agent_tools::session_mcp::HelperRequest =
+            serde_json::from_str(args.params.get()).map_err(|error| {
+                acp::Error::invalid_params().data(format!(
+                    "invalid terminal action request parameters: {error}"
+                ))
+            })?;
+        let action_tool = {
+            use crate::agent_tools::action_proposal::schema::McpActionTool;
+            McpActionTool::from_tool_name(&request.tool).ok_or_else(|| {
+                acp::Error::invalid_params().data(format!(
+                    "unknown terminal action tool `{}`; expected one of: {}",
+                    request.tool,
+                    McpActionTool::ALL
+                        .iter()
+                        .map(|tool| tool.tool_name())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ))
+            })?
+        };
+        let payload = serde_json::to_string(&request.arguments).map_err(|error| {
+            acp::Error::internal_error().data(format!(
+                "failed to encode terminal action arguments: {error}"
+            ))
+        })?;
+        if payload.len() > crate::agent_tools::action_proposal::schema::MAX_PAYLOAD_BYTES {
+            let response = ProposalValidationResponse {
+                phase: ValidationPhase::Validation,
+                status: ProposalValidationStatus::InvalidSchema,
+                proposal_id: None,
+                reason: Some("terminal action request exceeds the payload limit".to_string()),
+                retryable: false,
+            };
+            let raw = serde_json::value::to_raw_value(&response).map_err(|error| {
+                acp::Error::internal_error().data(format!("encode proposal response: {error}"))
+            })?;
+            return Ok(acp::schema::v1::ExtResponse::new(raw.into()));
+        }
+
+        let context = match self
+            .state
+            .proposal_channels
+            .begin_mcp_validation(&request.session_id)
+        {
+            Ok(context) => context,
+            Err(failure) => {
+                let response = ProposalValidationResponse {
+                    phase: ValidationPhase::Validation,
+                    status: failure.status,
+                    proposal_id: None,
+                    reason: Some(failure.reason.to_string()),
+                    retryable: failure.retryable,
+                };
+                let raw = serde_json::value::to_raw_value(&response).map_err(|error| {
+                    acp::Error::internal_error().data(format!("encode proposal response: {error}"))
+                })?;
+                return Ok(acp::schema::v1::ExtResponse::new(raw.into()));
+            }
+        };
+        let proposal_id = context.proposal_id.clone();
+        let (validation_tx, validation_rx) = tokio::sync::oneshot::channel();
+        if self
+            .state
+            .event_tx
+            .send(AppEvent::DirectTerminalActionProposal {
+                context,
+                payload,
+                source: ProposalPayloadSource::Mcp(action_tool),
+                responder: validation_tx,
+            })
+            .is_err()
+        {
+            self.state
+                .proposal_channels
+                .reject_validation(&proposal_id, false);
+            return Err(acp::Error::internal_error().data("Helper UI is unavailable"));
+        }
+        let decision =
+            match tokio::time::timeout(std::time::Duration::from_secs(10), validation_rx).await {
+                Ok(Ok(decision)) => decision,
+                Ok(Err(_)) => ProposalValidationDecision {
+                    status: ProposalValidationStatus::Unavailable,
+                    reason: Some("Helper dropped the validation response".to_string()),
+                    retryable: false,
+                },
+                Err(_) => ProposalValidationDecision {
+                    status: ProposalValidationStatus::Unavailable,
+                    reason: Some("Helper validation timed out".to_string()),
+                    retryable: false,
+                },
+            };
+        if decision.status != ProposalValidationStatus::Accepted {
+            let retryable = self
+                .state
+                .proposal_channels
+                .reject_validation(&proposal_id, decision.retryable);
+            let response = ProposalValidationResponse {
+                phase: ValidationPhase::Validation,
+                status: decision.status,
+                proposal_id: None,
+                reason: decision.reason,
+                retryable,
+            };
+            let raw = serde_json::value::to_raw_value(&response).map_err(|error| {
+                acp::Error::internal_error().data(format!("encode proposal response: {error}"))
+            })?;
+            return Ok(acp::schema::v1::ExtResponse::new(raw.into()));
+        }
+        if !self
+            .state
+            .proposal_channels
+            .accept_validation_detached(&proposal_id)
+        {
+            return Err(acp::Error::internal_error()
+                .data("terminal action request became stale after validation"));
+        }
+
+        let (commit_tx, commit_rx) = tokio::sync::oneshot::channel();
+        if self
+            .state
+            .event_tx
+            .send(AppEvent::DirectTerminalActionProposalCommit {
+                proposal_id: proposal_id.clone(),
+                responder: commit_tx,
+            })
+            .is_err()
+        {
+            self.state
+                .proposal_channels
+                .resolve_final(&proposal_id, ProposalFinalStatus::Unavailable);
+            return Err(acp::Error::internal_error().data("Helper UI is unavailable"));
+        }
+        let committed = matches!(
+            tokio::time::timeout(std::time::Duration::from_secs(10), commit_rx).await,
+            Ok(Ok(true))
+        );
+        if !committed {
+            self.state
+                .proposal_channels
+                .resolve_final(&proposal_id, ProposalFinalStatus::Unavailable);
+            return Err(acp::Error::internal_error()
+                .data("Helper did not confirm the terminal action card"));
+        }
+
+        let response = ProposalValidationResponse {
+            phase: ValidationPhase::Validation,
+            status: ProposalValidationStatus::Accepted,
+            proposal_id: Some(proposal_id),
+            reason: None,
+            retryable: false,
+        };
+        let raw = serde_json::value::to_raw_value(&response).map_err(|error| {
+            acp::Error::internal_error().data(format!("encode proposal response: {error}"))
+        })?;
+        Ok(acp::schema::v1::ExtResponse::new(raw.into()))
+    }
+
+    async fn request_user_input(
+        &self,
+        args: acp::schema::v1::ExtRequest,
+    ) -> acp::Result<acp::schema::v1::ExtResponse> {
+        let helper_request: crate::agent_tools::session_mcp::UserInputHelperRequest =
+            serde_json::from_str(args.params.get()).map_err(|error| {
+                acp::Error::invalid_params()
+                    .data(format!("invalid user input request parameters: {error}"))
+            })?;
+        let request = helper_request
+            .request
+            .validate()
+            .map_err(|error| acp::Error::invalid_params().data(error.to_string()))?;
+        let (responder, response) = tokio::sync::oneshot::channel();
+        let mut guard = UserInputUiGuard::new(
+            self.state.event_tx.clone(),
+            helper_request.request_id.clone(),
+            helper_request.session_id.clone(),
+        );
+        self.state
+            .event_tx
+            .send(AppEvent::UserInputRequest {
+                request_id: helper_request.request_id,
+                session_id: helper_request.session_id,
+                request,
+                responder,
+            })
+            .map_err(|_| acp::Error::internal_error().data("Helper UI is unavailable"))?;
+        let response = response
+            .await
+            .unwrap_or(crate::agent_tools::user_input::UserInputResponse::Cancelled);
+        guard.disarm();
+        let raw = serde_json::value::to_raw_value(&response).map_err(|error| {
+            acp::Error::internal_error().data(format!("encode user input response: {error}"))
+        })?;
+        Ok(acp::schema::v1::ExtResponse::new(raw.into()))
+    }
+
+    async fn cancel_user_input(
+        &self,
+        args: acp::schema::v1::ExtRequest,
+    ) -> acp::Result<acp::schema::v1::ExtResponse> {
+        let request: crate::agent_tools::session_mcp::CancelUserInputHelperRequest =
+            serde_json::from_str(args.params.get()).map_err(|error| {
+                acp::Error::invalid_params().data(format!(
+                    "invalid user input cancellation parameters: {error}"
+                ))
+            })?;
+        self.state
+            .event_tx
+            .send(AppEvent::CancelUserInputRequest {
+                request_id: request.request_id,
+                session_id: request.session_id,
+            })
+            .map_err(|_| acp::Error::internal_error().data("Helper UI is unavailable"))?;
+        Ok(acp::schema::v1::ExtResponse::new(
+            serde_json::value::RawValue::from_string("{}".to_string())
+                .map_err(|error| acp::Error::internal_error().data(error.to_string()))?
+                .into(),
+        ))
+    }
+
+    /// Receive `intellterm.wta/session_{added,removed}` notifications
+    /// pushed by master so the helper's local `alive` mirror stays in
+    /// sync without polling. We translate to an `AppEvent` rather than
+    /// mutating the registry here because the registry is owned by
+    /// `App` (constructed after the ACP client task spawns); routing
+    /// through the event loop also keeps registry mutation
+    /// single-writer and trace-able alongside other state changes.
+    ///
+    /// Unknown / malformed notifications are silently dropped — a
+    /// future master may broadcast new methods we don't recognise, and
+    /// surfacing the error here would tear down the connection on what
+    /// is by definition optional, advisory data.
+    async fn ext_notification(&self, args: acp::schema::v1::ExtNotification) -> acp::Result<()> {
+        if let Some(catalog) =
+            crate::protocol::acp::model_select::parse_wta_cloud_catalog_notification(&args)
+        {
+            match catalog {
+                Ok(catalog) => {
+                    tracing::info!(
+                        target: "cloud_models",
+                        source = ?catalog.source,
+                        model_count = catalog.models.len(),
+                        "received asynchronous native cloud model catalog from master"
+                    );
+                    let _ = self
+                        .state
+                        .event_tx
+                        .send(AppEvent::CloudModelsAvailable(catalog.models));
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        target: "cloud_models",
+                        %error,
+                        "dropping malformed asynchronous cloud model catalog"
+                    );
+                }
+            }
+            return Ok(());
+        }
+
+        use crate::session_registry::{parse_ext_notification, WtaExtNotification};
+        match parse_ext_notification(&args) {
+            WtaExtNotification::SessionAdded(info) => {
+                let _ = self.state.event_tx.send(AppEvent::AliveSessionAdded(info));
+            }
+            WtaExtNotification::SessionRemoved(params) => {
+                let _ = self
+                    .state
+                    .event_tx
+                    .send(AppEvent::AliveSessionRemoved(params));
+            }
+            WtaExtNotification::SessionsChanged => {
+                let _ = self.state.event_tx.send(AppEvent::SessionsChanged);
+            }
+            WtaExtNotification::Unknown => {
+                tracing::trace!(
+                    target: "acp_client",
+                    method = %args.method,
+                    "ignoring ext-notification from unknown namespace"
+                );
+            }
+            WtaExtNotification::MalformedParams { method, error } => {
+                tracing::warn!(
+                    target: "acp_client",
+                    %method,
+                    %error,
+                    "dropping malformed intellterm.wta ext-notification"
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+async fn capture_provider_command(
+    conn: &conn::ClientLink,
+    client: &WtaClient,
+    session_id: &acp::schema::v1::SessionId,
+    command: &'static str,
+) -> Result<String> {
+    const PROVIDER_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+    let session_id_text = session_id.to_string();
+    if !client.state.provider_probe_capture.begin(&session_id_text) {
+        anyhow::bail!("provider probe already active for session");
+    }
+    let result = tokio::time::timeout(
+        PROVIDER_PROBE_TIMEOUT,
+        conn.prompt(acp::schema::v1::PromptRequest::new(
+            session_id.clone(),
+            vec![command.to_string().into()],
+        )),
+    )
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let output = client
+        .state
+        .provider_probe_capture
+        .finish(&session_id_text)
+        .unwrap_or_default();
+
+    match result {
+        Ok(Ok(_)) => Ok(output),
+        Ok(Err(error)) => anyhow::bail!("{} probe failed: {}", command, error),
+        Err(_) => anyhow::bail!("{} probe timed out", command),
+    }
+}
+
+async fn probe_private_usage(
+    conn: &conn::ClientLink,
+    client: &WtaClient,
+    identity: &PromptUsageIdentity,
+    session_id: acp::schema::v1::SessionId,
+) -> Result<Option<crate::usage::UsageSnapshot>> {
+    let Some(family_id) = identity.family_id.as_deref() else {
+        return Ok(None);
+    };
+    let session_id_text = session_id.to_string();
+    if client
+        .state
+        .standard_usage_sessions
+        .lock()
+        .unwrap()
+        .contains(&session_id_text)
+    {
+        return Ok(None);
+    }
+    let Some(reporter_id) = identity.reporter_id.as_deref() else {
+        return Ok(None);
+    };
+    let Some(adapter) = crate::usage::providers::lookup(family_id) else {
+        return Ok(None);
+    };
+    if adapter.private_usage_policy()
+        != crate::usage::providers::PrivateUsagePolicy::VerifiedCommandProbe
+        || !adapter.trusted_reporter_ids().contains(&reporter_id)
+    {
+        return Ok(None);
+    }
+
+    let mut snapshot = crate::usage::normalize_provider_contribution(Default::default());
+
+    for command in adapter.post_turn_commands() {
+        match capture_provider_command(conn, client, &session_id, command).await {
+            Ok(output) => {
+                let contribution = adapter.extract_private_usage(
+                    crate::usage::providers::ProviderUsageRequest {
+                        reporter_id: Some(reporter_id),
+                        input: crate::usage::providers::ProviderUsageInput::ProviderCommandOutput {
+                            command,
+                            text: &output,
+                        },
+                    },
+                )?;
+                snapshot.merge(crate::usage::normalize_provider_contribution(contribution));
+            }
+            Err(error) => {
+                tracing::warn!(
+                    target: "usage",
+                    %family_id,
+                    session_id = %session_id_text,
+                    %command,
+                    error = %error,
+                    "optional provider usage command failed"
+                );
+            }
+        }
+    }
+
+    if snapshot.context.is_none() && snapshot.cost.is_none() && snapshot.provider_metrics.is_empty()
+    {
+        return Ok(None);
+    }
+    Ok(Some(snapshot))
+}
+
+/// The helper-mode ACP client loop. Instead of spawning the agent CLI
+/// as a child process and talking ACP over its stdio, this connects to
+/// a wta-master singleton over the named pipe whose path is passed in
+/// `pipe_name` and speaks ACP over that pipe. The master (from this
+/// helper's perspective) plays the role of the agent.
+///
+/// Wires the App-facing select-loop, minus the restart-loop wrapper: helper
+/// mode doesn't own the agent CLI lifetime (master does). `/restart` is
+/// delegated to C++ via `restart_agent_stack`; C++ replaces the master while
+/// retaining viable panes, and each helper reconnects its saved binding over
+/// the stable pipe when the old transport closes.
+///
+/// See doc/specs/Multi-window-agent-pane.md for the helper+master
+/// architecture, and `tools/wta/src/master/mod.rs` for the peer.
+
+/// Process-wide owner tab StableId for this helper, seeded at startup and
+/// rekeyed when WT drags the tab into another window. Every later
+/// `session/new` / `session/load` reads the current value so master does not
+/// get re-poisoned with the pre-drag StableId.
+static HELPER_OWNER_TAB_ID: std::sync::OnceLock<std::sync::RwLock<Option<String>>> =
+    std::sync::OnceLock::new();
+
+/// Seed the process-wide owner tab StableId. Empty/blank ids are stored as
+/// `None`.
+pub fn set_helper_owner_tab_id(owner_tab_id: Option<&str>) {
+    let normalized = owner_tab_id
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    *HELPER_OWNER_TAB_ID
+        .get_or_init(|| std::sync::RwLock::new(None))
+        .write()
+        .unwrap() = normalized;
+}
+
+fn helper_owner_tab_id() -> Option<String> {
+    HELPER_OWNER_TAB_ID
+        .get()
+        .and_then(|owner| owner.read().unwrap().clone())
+}
+
+fn rename_helper_owner_tab_id(old_tab_id: &str, new_tab_id: &str) {
+    let Some(owner) = HELPER_OWNER_TAB_ID.get() else {
+        return;
+    };
+    let mut owner = owner.write().unwrap();
+    if owner.as_deref() == Some(old_tab_id) {
+        *owner = Some(new_tab_id.to_string());
+    }
+}
+
+/// Inject `_meta.wta.pane_session_id = $WT_SESSION` (lowercased, no
+/// braces) and `_meta.wta.owner_tab_id = <this helper's StableId>` into
+/// an outbound ACP `session/new` or `session/load` request, when this
+/// helper is running inside a Windows Terminal pane.
+///
+/// Used by the helper-over-master path to tell `wta-master` which WT
+/// pane owns the session it's about to create or rehydrate (so focus /
+/// session-list resolution works) and which WT tab owns it (so close-by-tab
+/// can resolve the exact helper). Master records both in `SessionRegistry`
+/// and its per-helper ownership map.
+///
+/// No-op for whichever fields are unavailable: `pane_session_id` when
+/// `WT_SESSION` is unset/empty (e.g. running outside a WT pane in
+/// tests), `owner_tab_id` when `--owner-tab-id` wasn't supplied.
+fn inject_wta_pane_meta(meta: &mut Option<acp::schema::v1::Meta>, proposal_mcp_enabled: bool) {
+    let wt_session = std::env::var("WT_SESSION").unwrap_or_default();
+    let pane_session_id = {
+        let normalized = wt_session
+            .trim_matches(|c| c == '{' || c == '}')
+            .to_ascii_lowercase();
+        if normalized.is_empty() {
+            None
+        } else {
+            Some(normalized)
+        }
+    };
+    let owner_tab_id = helper_owner_tab_id();
+    if pane_session_id.is_none() && owner_tab_id.is_none() && !proposal_mcp_enabled {
+        return;
+    }
+    crate::session_registry::inject_wta_meta(
+        meta,
+        &crate::session_registry::WtaMeta {
+            pane_session_id,
+            owner_tab_id,
+            proposal_mcp: proposal_mcp_enabled.then(|| "http-v1".to_string()),
+            ..Default::default()
+        },
+    );
+}
+
+fn take_retired_session_result(meta: &mut Option<acp::schema::v1::Meta>) -> bool {
+    crate::session_registry::extract_wta_meta(meta)
+        .session_result
+        .as_deref()
+        == Some("retired")
+}
+
+fn elapsed_ms_since(start: std::time::Instant) -> f64 {
+    start.elapsed().as_secs_f64() * 1000.0
+}
+
+fn acp_result_failure_fields<T>(result: &acp::Result<T>) -> (&'static str, i32) {
+    match result {
+        Ok(_) => ("", 0),
+        Err(e) => ("AcpError", e.code.into()),
+    }
+}
+
+fn timeout_result_failure_fields<T>(
+    result: &std::result::Result<acp::Result<T>, tokio::time::error::Elapsed>,
+) -> (&'static str, i32) {
+    match result {
+        Ok(inner) => acp_result_failure_fields(inner),
+        Err(_) => ("Timeout", 0),
+    }
+}
+
+fn log_acp_initialize_timeout_result(
+    route: &str,
+    started: std::time::Instant,
+    result: &std::result::Result<
+        acp::Result<acp::schema::v1::InitializeResponse>,
+        tokio::time::error::Elapsed,
+    >,
+) {
+    let (failure_kind, acp_error_code) = timeout_result_failure_fields(result);
+    crate::telemetry::log_acp_initialize_complete(
+        elapsed_ms_since(started),
+        matches!(result, Ok(Ok(_))),
+        route,
+        failure_kind,
+        acp_error_code,
+    );
+}
+
+fn log_acp_new_session_result(
+    route: &str,
+    started: std::time::Instant,
+    result: &acp::Result<acp::schema::v1::NewSessionResponse>,
+) {
+    let (failure_kind, acp_error_code) = acp_result_failure_fields(result);
+    crate::telemetry::log_acp_new_session_complete(
+        elapsed_ms_since(started),
+        result.is_ok(),
+        route,
+        failure_kind,
+        acp_error_code,
+    );
+}
+
+fn provider_command_blocked_by_policy(command_name: &str) -> String {
+    let command = format!("/{command_name}");
+    t!(
+        "system.provider_command_blocked_by_policy",
+        command = command.as_str()
+    )
+    .into_owned()
+}
+
+fn provider_permission_contract_blocked(error: &str) -> String {
+    t!(
+        "system.config_update_failed",
+        option = "Yolo",
+        error = error
+    )
+    .into_owned()
+}
+
+fn provider_disable_pending() -> String {
+    let error = t!("system.yolo_disable_pending");
+    provider_permission_contract_blocked(error.as_ref())
+}
+
+fn publish_retryable_lazy_yolo_error(event_tx: &mpsc::UnboundedSender<AppEvent>, session_id: &str) {
+    let retry = t!("setup.option.retry_detection").into_owned();
+    let message = t!(
+        "system.config_update_failed",
+        option = "Yolo",
+        error = retry.as_str()
+    )
+    .into_owned();
+    let _ = event_tx.send(AppEvent::AgentError {
+        session_id: Some(session_id.to_string()),
+        failure: AgentFailure::Protocol {
+            code: -32003,
+            message: message.clone(),
+        },
+        message,
+    });
+}
+
+/// Discover the provider-advertised ACP Yolo capability. `SessionAttached`
+/// applies the latest effective state after the App binds the session.
+fn record_native_yolo(resp: &acp::schema::v1::NewSessionResponse, state: &ClientState) {
+    state.native_yolo.record_from_new_session(resp);
+}
+
+async fn apply_native_yolo_checked(
+    conn: &conn::ClientLink,
+    state: &ClientState,
+    operation: super::native_yolo::NativeYoloOperation,
+    timeout: std::time::Duration,
+) -> std::result::Result<
+    Option<Vec<acp::schema::v1::SessionConfigOption>>,
+    super::native_yolo::NativeYoloApplyError,
+> {
+    state
+        .native_yolo
+        .apply_reserved_with_policy_timeout_and_config(
+            conn,
+            operation,
+            timeout,
+            Some(&state.yolo_state),
+        )
+        .await
+}
+
+/// Handle a `session/load` failure (Err or timeout) in the
+/// `load_session_rx` arm of `run_acp_client_over_pipe`.
+///
+/// Two cases:
+///   * `old_sid = Some` (mid-life session management load failure): restore the prior
+///     binding so the pane keeps a usable session. The user sees a
+///     `TabError` and their existing session is still alive.
+///   * `old_sid = None` (boot-time load failure with no bootstrap):
+///     fall back to creating a fresh `new_session` so the pane is
+///     still usable. The user sees a `TabError` AND a working blank
+///     session, matching the pre-Plan-B UX where a bootstrap session
+///     was always created.
+async fn handle_load_failure(
+    old_sid: Option<&acp::schema::v1::SessionId>,
+    failed_sid: String,
+    tab_id: String,
+    binding_generation: u64,
+    cwd: std::path::PathBuf,
+    conn: conn::ClientLink,
+    tab_to_session: Arc<tokio::sync::Mutex<HashMap<String, acp::schema::v1::SessionId>>>,
+    tab_binding_generations: SharedTabBindingGenerations,
+    event_tx: mpsc::UnboundedSender<AppEvent>,
+    error_message: String,
+    _proposal_channels: Arc<crate::agent_tools::action_proposal::channel::ProposalChannelManager>,
+    proposal_mcp_enabled: bool,
+    client_state: Arc<ClientState>,
+    tab_aliases: SharedTabAliases,
+) {
+    let Some(current_tab_id) = current_tab_binding_operation(
+        &tab_aliases,
+        &tab_binding_generations,
+        &tab_id,
+        binding_generation,
+    ) else {
+        return;
+    };
+    let _ = event_tx.send(AppEvent::AgentSessionEvent(
+        crate::agent_sessions::SessionEvent::ResumeFailed {
+            key: failed_sid,
+            reason: error_message.clone(),
+        },
+    ));
+    if let Some(old) = old_sid {
+        // Mid-life session management load failure path: restore prior binding.
+        let mut g = tab_to_session.lock().await;
+        g.insert(current_tab_id.clone(), old.clone());
+        drop(g);
+        let _ = event_tx.send(AppEvent::TabError {
+            tab_id: current_tab_id,
+            message: error_message,
+        });
+        return;
+    }
+
+    // Boot-time load failure: helper has no prior session for this
+    // tab (we skipped the bootstrap when `--initial-load-session-id`
+    // was set). Create a fresh `new_session` so prompts have
+    // somewhere to land.
+    let _ = event_tx.send(AppEvent::TabError {
+        tab_id: current_tab_id.clone(),
+        message: format!("{} Starting a fresh session instead.", error_message),
+    });
+    let mut new_req = acp::schema::v1::NewSessionRequest::new(cwd);
+    inject_wta_pane_meta(&mut new_req.meta, proposal_mcp_enabled);
+    let fallback_started = std::time::Instant::now();
+    let fallback = conn.new_session(new_req).await;
+    log_acp_new_session_result("HelperPipeFallback", fallback_started, &fallback);
+    match fallback {
+        Ok(mut resp) => {
+            if take_retired_session_result(&mut resp.meta) {
+                tracing::info!(
+                    target: "acp_load_session",
+                    tab = %tab_id,
+                    session_id = %resp.session_id,
+                    "ignoring boot-time fallback session retired during tab reset or close"
+                );
+                return;
+            }
+            let Some(current_tab_id) = current_tab_binding_operation(
+                &tab_aliases,
+                &tab_binding_generations,
+                &tab_id,
+                binding_generation,
+            ) else {
+                return;
+            };
+            let new_sid = resp.session_id.clone();
+            tracing::info!(
+                target: "acp_load_session",
+                tab = %tab_id,
+                fallback_session_id = %new_sid,
+                "boot-time load fell back to new_session successfully"
+            );
+            tab_to_session
+                .lock()
+                .await
+                .insert(current_tab_id.clone(), new_sid.clone());
+            // Index the fallback session as an agent-pane origin so
+            // session management view can show it as a Historical row on next cold start
+            // (it is now a real, persistent session).
+            let pane_session_id = std::env::var("WT_SESSION").unwrap_or_default();
+            let pane_for_index = if pane_session_id.is_empty() {
+                None
+            } else {
+                Some(pane_session_id.as_str())
+            };
+            record_agent_pane_origin(&client_state, new_sid.0.as_ref(), pane_for_index);
+            let (available_models, current_model_id) =
+                crate::protocol::acp::model_select::models_from_new_session(&resp);
+            record_native_yolo(&resp, &client_state);
+            let _ = event_tx.send(AppEvent::SessionAttached {
+                tab_id: current_tab_id,
+                session_id: new_sid.to_string(),
+                prompt_id: None,
+                available_models,
+                current_model_id,
+            });
+            publish_session_config_options(
+                &event_tx,
+                &client_state.native_yolo,
+                &new_sid,
+                resp.config_options.as_deref(),
+            );
+        }
+        Err(e) => {
+            let Some(current_tab_id) = current_tab_binding_operation(
+                &tab_aliases,
+                &tab_binding_generations,
+                &tab_id,
+                binding_generation,
+            ) else {
+                return;
+            };
+            tracing::error!(
+                target: "acp_load_session",
+                tab = %current_tab_id,
+                error = ?e,
+                "boot-time load fallback new_session failed"
+            );
+            let _ = event_tx.send(AppEvent::TabError {
+                tab_id: current_tab_id,
+                message: format!("Fallback new_session also failed: {}", e),
+            });
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn run_acp_client_over_pipe(
+    pipe_name: String,
+    acp_model_override: Option<String>,
+    custom_model_selection: Option<String>,
+    supplied_cloud_models: Vec<AcpModelInfo>,
+    // Per-tab agent identity. Forwarded to the multi-agent master in the
+    // `initialize` handshake's `_meta.wta.agent_id` so master selects and
+    // reconstructs the matching agent CLI for THIS tab from the id alone
+    // (it never executes a command string sent over the pipe). `None` →
+    // master uses its `--agent` default (the legacy single-agent behavior).
+    agent_id: Option<String>,
+    agent_source: crate::agent_source::AgentSource,
+    source_cwd: Option<String>,
+    owner_tab_id: Option<String>,
+    initial_load_session_id: Option<String>,
+    yolo_state: crate::app_contracts::SharedYoloState,
+    event_tx: mpsc::UnboundedSender<AppEvent>,
+    mut prompt_rx: mpsc::UnboundedReceiver<PromptSubmission>,
+    mut new_session_rx: mpsc::UnboundedReceiver<NewSessionForTab>,
+    mut load_session_rx: mpsc::UnboundedReceiver<LoadSessionForTab>,
+    mut drop_session_rx: mpsc::UnboundedReceiver<DropSessionRequest>,
+    mut rename_session_rx: mpsc::UnboundedReceiver<RenameSessionRequest>,
+    mut restart_rx: mpsc::UnboundedReceiver<AgentLifecycleRequest>,
+    mut session_hook_rx: mpsc::UnboundedReceiver<crate::app::QueuedSessionHook>,
+    mut master_ext_rx: mpsc::UnboundedReceiver<MasterExtRequest>,
+    shell_mgr: Arc<ShellManager>,
+    wt_connected: bool,
+    post_login_reconnect: bool,
+    proposal_channels: Arc<crate::agent_tools::action_proposal::channel::ProposalChannelManager>,
+) -> Result<AcpClientExit> {
+    let startup_probe = StartupProbe::new();
+    let usage_family_id = agent_id.as_deref().and_then(|agent_id| {
+        let family_id = agent_id.trim().to_ascii_lowercase();
+        crate::agent_registry::is_known_id(&family_id).then_some(family_id)
+    });
+    startup_probe.log(&format!(
+        "run_acp_client_over_pipe task start pipe={} acp_model={:?} wt_connected={}",
+        pipe_name, acp_model_override, wt_connected
+    ));
+
+    // Whether this WTA process is hosting an Intelligent Terminal agent
+    // pane: `--owner-tab-id` is the
+    // load-bearing signal. Helper mode is always spawned by WT with an
+    // owner-tab-id, but we keep the same defensive default.
+    let is_agent_pane = owner_tab_id
+        .as_ref()
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false);
+
+    // Connect to the master singleton over the named pipe. The C++
+    // SharedWta side spawns the master and the helper basically back
+    // to back, so the helper races against master's startup — master
+    // has to spawn its agent CLI subprocess and call `initialize`
+    // (up to 60s for `npx` adapter cold-starts) BEFORE it opens the
+    // pipe. Retry-with-backoff until master is ready or we give up
+    // (spec Z-R6).
+    let _ = event_tx.send(AppEvent::ConnectionStage(
+        t!("connection.coordinator").into_owned(),
+    ));
+    startup_probe.log(&format!("opening master pipe: {}", pipe_name));
+    const ERROR_FILE_NOT_FOUND: i32 = 2;
+    const ERROR_PIPE_BUSY: i32 = 231;
+    let pipe = {
+        let mut attempt: u32 = 0;
+        let backoff_ms = if post_login_reconnect {
+            POST_LOGIN_MASTER_PIPE_BACKOFF_MS
+        } else {
+            MASTER_PIPE_BACKOFF_MS
+        };
+        loop {
+            match tokio::net::windows::named_pipe::ClientOptions::new().open(&pipe_name) {
+                Ok(pipe) => {
+                    // Always log the connect milestone at info (not just on
+                    // retry) so a clean helper→master connect is visible in
+                    // release logs, not only failures/retries.
+                    tracing::info!(
+                        target: "helper",
+                        step = "pipe_connect",
+                        pipe = %pipe_name,
+                        attempts = attempt + 1,
+                        "master pipe connected"
+                    );
+                    break pipe;
+                }
+                Err(e) => {
+                    let raw = e.raw_os_error().unwrap_or(0);
+                    let retryable = raw == ERROR_FILE_NOT_FOUND || raw == ERROR_PIPE_BUSY;
+                    if !retryable || attempt as usize >= backoff_ms.len() {
+                        tracing::warn!(
+                            target: "helper",
+                            step = "pipe_connect",
+                            pipe = %pipe_name,
+                            attempts = attempt + 1,
+                            error = %e,
+                            "master pipe connect giving up"
+                        );
+                        let detail = format!(
+                            "connect to master pipe '{}' after {} attempt(s): {}",
+                            pipe_name,
+                            attempt + 1,
+                            e
+                        );
+                        let _ = event_tx.send(AppEvent::AgentTransportRetired);
+                        return Err(anyhow::Error::new(AgentFailure::HandshakeFailed {
+                            stage: HandshakeStage::PipeConnect,
+                            detail,
+                        }));
+                    }
+                    let wait = backoff_ms[attempt as usize];
+                    tracing::debug!(
+                        target: "helper",
+                        step = "pipe_connect",
+                        pipe = %pipe_name,
+                        attempt = attempt + 1,
+                        wait_ms = wait,
+                        error = %e,
+                        "master pipe not ready, retrying"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(wait)).await;
+                    attempt += 1;
+                }
+            }
+        }
+    };
+
+    let (read_half, write_half) = tokio::io::split(pipe);
+    let prompt_timing = Arc::new(PromptTimingState::default());
+    let outgoing = write_half.compat_write();
+    let incoming = read_half.compat();
+
+    let native_yolo = Arc::new(super::native_yolo::NativeYoloState::new());
+    let state = Arc::new(ClientState {
+        event_tx: event_tx.clone(),
+        shell_mgr: shell_mgr.clone(),
+        prompt_timing: prompt_timing.clone(),
+        native_yolo,
+        yolo_state,
+        provider_probe_capture: ProviderProbeCapture::default(),
+        standard_usage_sessions: Mutex::new(HashSet::new()),
+        proposal_channels: Arc::clone(&proposal_channels),
+        hidden_tool_calls: std::sync::Mutex::new(std::collections::HashMap::new()),
+        origin_scope: std::sync::OnceLock::new(),
+    });
+    let client = WtaClient {
+        state: state.clone(),
+    };
+
+    let builder = acp::Client
+        .builder()
+        .name("wta-helper")
+        .on_receive_request(
+            {
+                let c = client.clone();
+                move |req: acp::schema::v1::AgentRequest, responder, _cx| {
+                    let c = c.clone();
+                    async move {
+                        use acp::schema::v1::{AgentRequest as Q, ClientResponse as R};
+                        match req {
+                            Q::RequestPermissionRequest(a) => conn::respond_enum(
+                                responder,
+                                c.request_permission(a)
+                                    .await
+                                    .map(R::RequestPermissionResponse),
+                            ),
+                            Q::CreateTerminalRequest(a) => conn::respond_enum(
+                                responder,
+                                c.create_terminal(a).await.map(R::CreateTerminalResponse),
+                            ),
+                            Q::TerminalOutputRequest(a) => conn::respond_enum(
+                                responder,
+                                c.terminal_output(a).await.map(R::TerminalOutputResponse),
+                            ),
+                            Q::WaitForTerminalExitRequest(a) => conn::respond_enum(
+                                responder,
+                                c.wait_for_terminal_exit(a)
+                                    .await
+                                    .map(R::WaitForTerminalExitResponse),
+                            ),
+                            Q::ReleaseTerminalRequest(a) => conn::respond_enum(
+                                responder,
+                                c.release_terminal(a).await.map(R::ReleaseTerminalResponse),
+                            ),
+                            Q::KillTerminalRequest(a) => conn::respond_enum(
+                                responder,
+                                c.kill_terminal(a).await.map(R::KillTerminalResponse),
+                            ),
+                            Q::ExtMethodRequest(a)
+                                if crate::agent_tools::session_mcp::helper_method_matches(
+                                    &a.method,
+                                ) =>
+                            {
+                                conn::respond_enum(
+                                    responder,
+                                    c.request_terminal_actions(a)
+                                        .await
+                                        .map(R::ExtMethodResponse),
+                                )
+                            }
+                            Q::ExtMethodRequest(a)
+                                if crate::agent_tools::session_mcp::user_input_helper_method_matches(
+                                    &a.method,
+                                ) =>
+                            {
+                                conn::respond_enum(
+                                    responder,
+                                    c.request_user_input(a)
+                                        .await
+                                        .map(R::ExtMethodResponse),
+                                )
+                            }
+                            Q::ExtMethodRequest(a)
+                                if crate::agent_tools::session_mcp::cancel_user_input_helper_method_matches(
+                                    &a.method,
+                                ) =>
+                            {
+                                conn::respond_enum(
+                                    responder,
+                                    c.cancel_user_input(a)
+                                        .await
+                                        .map(R::ExtMethodResponse),
+                                )
+                            }
+                _ => responder.respond_with_error(acp::Error::method_not_found()),
+            }
+                    }
+                }
+            },
+            acp::on_receive_request!(),
+        )
+        .on_receive_notification(
+            {
+                let c = client.clone();
+                move |notif: acp::schema::v1::AgentNotification, _cx| {
+                    let c = c.clone();
+                    async move {
+                        use acp::schema::v1::AgentNotification as N;
+                        match notif {
+                            N::SessionNotification(n) => c.dispatch_session_notification(n).await,
+                            N::ExtNotification(n) => {
+                                let _ = c.ext_notification(n).await;
+                            }
+                            _ => {}
+                        }
+                        Ok(())
+                    }
+                }
+            },
+            acp::on_receive_notification!(),
+        );
+
+    let (conn, handle_io) = conn::spawn_client(builder, conn::byte_streams(outgoing, incoming));
+    startup_probe.log("ACP client connection created (over pipe)");
+
+    let intentional_shutdown = Arc::new(AtomicBool::new(false));
+    let io_probe = startup_probe.clone();
+    let io_task = tokio::task::spawn_local(async move {
+        io_probe.log("ACP handle_io task started (over pipe)");
+        // The I/O loop only ends when the pipe to wta-master is gone. Crucially,
+        // a *killed* master resolves this as **Ok(())** (clean EOF on the pipe),
+        // not Err — confirmed from a real trace where `taskkill` on wta-master
+        // produced "ACP handle_io completed", after which the UI sat on
+        // `Connected` until the next prompt failed with "server shut down
+        // unexpectedly". So BOTH arms must signal connection loss; keying only on
+        // Err (the original F3 fix) would miss the common case.
+        match handle_io.await {
+            Err(e) => {
+                tracing::warn!(target: "helper", error = %format!("{:#}", e), "ACP I/O loop to master failed");
+            }
+            Ok(()) => {
+                io_probe.log("ACP handle_io completed (over pipe)");
+                tracing::warn!(target: "helper", "ACP I/O loop to master ended — pipe closed (master gone)");
+            }
+        }
+    });
+    let mut transport_guard = ClientTransportGuard {
+        conn: conn.clone(),
+        suppress_transport_error: Arc::clone(&intentional_shutdown),
+        event_tx: event_tx.clone(),
+        io_task: Some(io_task),
+        retirement_published: false,
+    };
+
+    // Initialize — same as the child-process path. We use a 60s timeout
+    // here because the first helper to connect to a fresh master may
+    // ride along with the master's real agent CLI spawn (especially the
+    // npx adapter cold start). Clean cloud discovery runs asynchronously
+    // after that initialize and is delivered later, so it never consumes
+    // this timeout budget. Subsequent inits are cached replays.
+    let _ = event_tx.send(AppEvent::ConnectionStage(
+        t!("connection.initializing").into_owned(),
+    ));
+    startup_probe.log("Initializing ACP (over pipe)");
+    let init_started = std::time::Instant::now();
+    let supplied_cloud_models = if matches!(&agent_source, crate::agent_source::AgentSource::Host) {
+        supplied_cloud_models
+    } else {
+        if !supplied_cloud_models.is_empty() {
+            tracing::warn!(
+                target: "cloud_models",
+                agent_source = %agent_source,
+                "ignoring Host startup cloud catalog for WSL helper"
+            );
+        }
+        Vec::new()
+    };
+    let init_request = {
+        let mut req = acp::schema::v1::InitializeRequest::new(acp::schema::ProtocolVersion::V1)
+            .client_capabilities(acp::schema::v1::ClientCapabilities::new().terminal(true))
+            .client_info(
+                acp::schema::v1::Implementation::new("wta-helper", env!("CARGO_PKG_VERSION"))
+                    .title("Windows Terminal Agent (helper)"),
+            );
+        // Declare which agent this tab wants by *identity* — id + model.
+        // The master selects + reconstructs the agent command from these
+        // (it deliberately does NOT execute a command string sent over
+        // the pipe — that would be an arbitrary-spawn surface for any
+        // same-user process). Two tabs with different ids land on
+        // different CLIs; same-id tabs share one. No command string is
+        // ever put on the wire.
+        crate::session_registry::inject_wta_meta(
+            &mut req.meta,
+            &crate::session_registry::WtaMeta {
+                // Canonicalize + filter the same way the master does (trim,
+                // ASCII-lowercase) and forward only *known* selectable ids.
+                // The master reconstructs the command from the id and rejects
+                // unknown / `custom:*` ids — forwarding those would trip an
+                // "unknown selection" warn on every connect and then fall back
+                // to the default anyway. Sending `None` makes that fallback
+                // silent (master applies its own `--agent` default).
+                agent_id: usage_family_id.clone(),
+                model: acp_model_override.clone().filter(|s| !s.trim().is_empty()),
+                provider_binding: Some(
+                    custom_model_selection
+                        .clone()
+                        .filter(|selection| !selection.trim().is_empty())
+                        .unwrap_or_else(|| "default".to_string()),
+                ),
+                agent_source: Some(agent_source.kind().to_string()),
+                wsl_distro: agent_source.distro().map(str::to_string),
+                cloud_models: if supplied_cloud_models.is_empty() {
+                    None
+                } else {
+                    match serde_json::to_string(&supplied_cloud_models) {
+                        Ok(models) => Some(models),
+                        Err(error) => {
+                            tracing::warn!(
+                                target: "cloud_models",
+                                %error,
+                                "failed to serialize helper cloud model catalog metadata"
+                            );
+                            None
+                        }
+                    }
+                },
+                cloud_models_source: (!supplied_cloud_models.is_empty())
+                    .then(|| "helper".to_string()),
+                ..Default::default()
+            },
+        );
+        req
+    };
+    let init_future = conn.initialize(init_request);
+    let init_result = tokio::time::timeout(std::time::Duration::from_secs(60), init_future).await;
+    log_acp_initialize_timeout_result("HelperPipe", init_started, &init_result);
+    let mut init_resp = init_result
+        .map_err(|_| {
+            tracing::error!(
+                target: "helper",
+                step = "acp_initialize",
+                pipe = %pipe_name,
+                "ACP initialize over master pipe timed out after 60s — wta-master did not respond"
+            );
+            anyhow::anyhow!(
+                "ACP initialize over master pipe timed out after 60s — \
+             wta-master did not respond"
+            )
+        })?
+        .map_err(|e| {
+            tracing::error!(
+                target: "helper",
+                step = "acp_initialize",
+                pipe = %pipe_name,
+                error = %e,
+                "ACP initialize over master pipe failed"
+            );
+            anyhow::Error::new(AgentFailure::HandshakeFailed {
+                stage: HandshakeStage::Initialize,
+                detail: acp_error_detail(&e),
+            })
+            .context("initialize over master pipe failed")
+        })?;
+    let wta_meta = crate::session_registry::extract_wta_meta(&mut init_resp.meta);
+    if let Some(scope) = wta_meta
+        .resolved_agent_id
+        .as_deref()
+        .or(agent_id.as_deref())
+        .and_then(|provider_id| {
+            crate::agent_pane_origin::OriginScope::new(
+                provider_id,
+                agent_source.session_location(),
+                None,
+            )
+        })
+    {
+        let _ = state.origin_scope.set(scope);
+    }
+    let telemetry_byok_binding = match wta_meta.resolved_model_source.as_deref() {
+        Some("byok") => Some(true),
+        Some("provider") => Some(false),
+        _ => {
+            tracing::debug!(target: "telemetry", "master did not report a known model binding category");
+            None
+        }
+    };
+    state
+        .native_yolo
+        .set_resolved_agent_id(wta_meta.resolved_agent_id.as_deref());
+    let cloud_catalog = crate::protocol::acp::model_select::cloud_catalog_from_wta_meta(&wta_meta);
+    if matches!(&agent_source, crate::agent_source::AgentSource::Host)
+        && !cloud_catalog.models.is_empty()
+    {
+        tracing::info!(
+            target: "cloud_models",
+            source = ?cloud_catalog.source,
+            model_count = cloud_catalog.models.len(),
+            "received native cloud model catalog from master"
+        );
+        let _ = event_tx.send(AppEvent::CloudModelsAvailable(cloud_catalog.models));
+    }
+    let prompt_usage_identity = PromptUsageIdentity {
+        family_id: usage_family_id,
+        reporter_id: init_resp.agent_info.as_ref().map(|info| info.name.clone()),
+    };
+    let proposal_commands_supported = init_resp.agent_capabilities.mcp_capabilities.http
+        && wta_meta.proposal_mcp.as_deref() == Some("http-v1");
+    // Connection milestone at info so a clean handshake is visible in release.
+    tracing::info!(
+        target: "helper",
+        step = "acp_initialize",
+        pipe = %pipe_name,
+        "ACP initialized over master pipe"
+    );
+    startup_probe.log(&format!(
+        "Agent init response received (over pipe): {:?}",
+        init_resp
+    ));
+
+    // ── Post-login authenticate ──────────────────────────────────────────
+    // If this is a reconnect after LoginComplete (the user just completed
+    // `copilot login` / `codex auth` / etc.), we MUST call `authenticate`
+    // per ACP spec before attempting `new_session`. Without this, the
+    // long-running agent CLI subprocess (owned by master) may not have
+    // noticed the new disk-stored token — its internal auth state was set
+    // at spawn time and may still be "not authenticated". The
+    // `authenticate` RPC is the deterministic signal that tells the agent
+    // "credentials changed, please re-check". See:
+    // https://agentclientprotocol.com/protocol/initialization
+    //
+    // Tracks whether we actually completed a post-login `authenticate` (vs.
+    // skipped it because the agent advertised no auth methods). Only then may
+    // a still-AuthRequired `new_session` be classified as the distinct
+    // "authenticate-OK-but-still-auth" recovery signal below.
+    let mut post_login_authenticated = false;
+    if post_login_reconnect {
+        let auth_method_id = init_resp.auth_methods.first().map(|m| m.id().clone());
+        if let Some(method_id) = auth_method_id {
+            let _ = event_tx.send(AppEvent::ConnectionStage(
+                t!("connection.authenticating").into_owned(),
+            ));
+            tracing::info!(
+                target: "helper",
+                method_id = %method_id.0,
+                auth_methods_count = init_resp.auth_methods.len(),
+                "post-login reconnect: sending authenticate to agent"
+            );
+            let auth_result = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                conn.authenticate(acp::schema::v1::AuthenticateRequest::new(method_id.clone())),
+            )
+            .await;
+            match &auth_result {
+                Ok(Ok(_)) => {
+                    tracing::info!(
+                        target: "helper",
+                        method_id = %method_id.0,
+                        "post-login authenticate succeeded"
+                    );
+                    post_login_authenticated = true;
+                }
+                Ok(Err(e)) => {
+                    let failure = AgentFailure::from_acp_error(e);
+                    tracing::error!(
+                        target: "helper",
+                        method_id = %method_id.0,
+                        error_code = Into::<i32>::into(e.code),
+                        error_message = %e.message,
+                        "post-login authenticate failed"
+                    );
+                    if failure.is_auth() {
+                        tracing::warn!(
+                            target: "auth_recovery",
+                            method_id = %method_id.0,
+                            "post-login authenticate still AuthRequired; requesting fresh-master recovery"
+                        );
+                    }
+                    return Err(post_login_authenticate_error(&method_id.0, e));
+                }
+                Err(_timeout) => {
+                    tracing::error!(
+                        target: "helper",
+                        method_id = %method_id.0,
+                        "post-login authenticate timed out (10s) — agent unresponsive"
+                    );
+                    return Err(anyhow::Error::new(AgentFailure::HandshakeFailed {
+                        stage: crate::protocol::acp::failure::HandshakeStage::Authenticate,
+                        detail: format!(
+                            "authenticate({}) timed out after 10s — agent unresponsive. \
+                             Try restarting Intelligent Terminal.",
+                            method_id.0,
+                        ),
+                    }));
+                }
+            }
+        } else {
+            tracing::warn!(
+                target: "helper",
+                "post-login reconnect: no auth_methods advertised in initialize response; \
+                 skipping authenticate (agent may not require it)"
+            );
+        }
+    }
+
+    // Bootstrap the alive-session mirror BEFORE creating our own
+    // session. We want master's existing view in the registry first so
+    // that any `intellterm.wta/session_added` notification for our own
+    // brand-new session arrives after the snapshot — otherwise a stale
+    // snapshot could overwrite it. Doing this before `new_session`
+    // guarantees ordering: list_sessions completes → AliveSnapshotLoaded
+    // queued → new_session → master broadcasts session_added →
+    // AliveSessionAdded queued → both applied in arrival order on the
+    // App event loop.
+    //
+    // The call is fire-and-forget: if list_sessions fails (e.g. an
+    // older master without `unstable_session_list`) the alive mirror
+    // just stays empty and `alive_loaded` stays false, which keeps
+    // session management routing on the legacy path.
+    let _ = event_tx.send(AppEvent::ConnectionStage(
+        t!("connection.syncing_sessions").into_owned(),
+    ));
+    match conn
+        .list_sessions(acp::schema::v1::ListSessionsRequest::new())
+        .await
+    {
+        Ok(resp) => {
+            let items: Vec<crate::session_registry::SessionInfo> = resp
+                .sessions
+                .iter()
+                .map(|wire| {
+                    let mut meta = wire.meta.clone();
+                    let wta = crate::session_registry::extract_wta_meta(&mut meta);
+                    let mut info = crate::session_registry::SessionInfo::new(
+                        wire.session_id.clone(),
+                        wire.cwd.clone(),
+                    );
+                    info.title = wire.title.clone();
+                    info.updated_at = wire.updated_at.clone();
+                    info.pane_session_id = wta.pane_session_id;
+                    info
+                })
+                .collect();
+            startup_probe.log(&format!(
+                "alive-session bootstrap: {} sessions from master",
+                items.len()
+            ));
+            let _ = event_tx.send(AppEvent::AliveSnapshotLoaded(items));
+        }
+        Err(e) => {
+            startup_probe.log(&format!(
+                "alive-session bootstrap skipped (list_sessions failed): {e}"
+            ));
+        }
+    }
+
+    // Create the initial session bound to the owner tab — unless this
+    // helper was spawned with `--initial-load-session-id`, in which case
+    // we skip the bootstrap entirely and let the boot-time `load_session`
+    // (queued by main.rs as an `AppEvent::WtEvent`) be the helper's
+    // first session. Skipping the bootstrap avoids the session management duplicate-row
+    // bug: master used to register both the bootstrap and the loaded
+    // sid (both bound to the same WT pane) and the session management view showed two
+    // Live rows for the same agent pane.
+    let cwd = source_cwd
+        .as_deref()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| match &agent_source {
+            crate::agent_source::AgentSource::Host => std::env::current_dir().unwrap_or_default(),
+            crate::agent_source::AgentSource::Wsl { .. } => std::path::PathBuf::from("/"),
+        });
+    let (session_id, mut available_models, mut current_model_id, mut session_config, has_bootstrap) =
+        if let Some(load_sid) = initial_load_session_id.as_deref() {
+            // No bootstrap. AgentConnected fires with the to-be-loaded
+            // sid as a placeholder so the App flips to Connected (and
+            // binds session_id → owner_tab in `session_to_tab` early,
+            // so any session/update chunks arriving before the
+            // load_session response route to the right tab). The
+            // actual `load_session` is driven by the App after it
+            // processes the queued WtEvent — see `load_session_rx`
+            // arm below for success/failure handling, including the
+            // fallback-to-new-session on boot-time load failure.
+            startup_probe.log(&format!(
+                "skipping bootstrap session/new (initial_load_session_id={} set)",
+                load_sid,
+            ));
+            // No session/new runs here. Use a neutral connection stage until
+            // AgentConnected; the activity row retains the queued resume context.
+            let _ = event_tx.send(AppEvent::ConnectionStage(
+                t!("connection.connecting_activity").into_owned(),
+            ));
+            (
+                acp::schema::v1::SessionId::new(load_sid.to_string()),
+                Vec::<AcpModelInfo>::new(),
+                None,
+                Vec::new(),
+                false,
+            )
+        } else {
+            let _ = event_tx.send(AppEvent::ConnectionStage(
+                t!("connection.creating_session").into_owned(),
+            ));
+            startup_probe.log("Creating session (over pipe)");
+            let mut new_session_req = acp::schema::v1::NewSessionRequest::new(cwd.clone());
+            inject_wta_pane_meta(&mut new_session_req.meta, proposal_commands_supported);
+            let new_session_started = std::time::Instant::now();
+            let new_session_result = conn.new_session(new_session_req).await;
+            log_acp_new_session_result(
+                "HelperPipeStartup",
+                new_session_started,
+                &new_session_result,
+            );
+            let mut session = new_session_result.map_err(|e| {
+                let failure = AgentFailure::from_acp_error(&e);
+                // If we just completed post-login authenticate successfully
+                // but new_session STILL returns AuthRequired, do NOT route
+                // back to the login screen (that would recreate the auth
+                // loop). Surface a terminal HandshakeFailed tagged with the
+                // `NewSession` stage — the distinct signal the App's
+                // post-login recovery policy matches via `failed_at`. This is
+                // deliberately NOT the `Authenticate` stage: an authenticate
+                // RPC that itself fails/times out (above) stays `Authenticate`
+                // and must NOT trigger a master restart, only this
+                // "authenticate-OK-but-new_session-still-auth" case should.
+                // Gate on `post_login_authenticated`: if `authenticate` was
+                // skipped (agent advertised no auth methods) we did not prove
+                // credentials refreshed, so don't emit the "after successful
+                // authenticate" signal — fall through to the normal auth
+                // classification instead (the App still recovers genuine auth
+                // failures via its `AuthRequired` arm, bounded to one restart).
+                if post_login_reconnect && post_login_authenticated && failure.is_auth() {
+                    tracing::error!(
+                        target: "helper",
+                        error_code = Into::<i32>::into(e.code),
+                        "new_session still AuthRequired after successful authenticate — \
+                         agent has a deeper auth issue; not routing back to login screen"
+                    );
+                    return anyhow::Error::new(AgentFailure::HandshakeFailed {
+                        stage: crate::protocol::acp::failure::HandshakeStage::NewSession,
+                        detail: format!(
+                            "Agent still requires authentication after successful authenticate. \
+                             This may indicate a Copilot subscription or organization access issue. \
+                             Try restarting Intelligent Terminal or check https://github.com/settings/copilot"
+                        ),
+                    });
+                }
+                // Normal path: attach the typed classification so an auth error
+                // (or any ACP code) survives the `?`-collapse into
+                // `anyhow` and can be recovered by `classify_anyhow`
+                // downcast at the receiver (main.rs).
+                anyhow::Error::new(failure)
+                    .context(format!("new_session over master pipe failed: {e}"))
+            })?;
+            if take_retired_session_result(&mut session.meta) {
+                anyhow::bail!("bootstrap session retired during tab reset or close");
+            }
+
+            let session_id = session.session_id.clone();
+            startup_probe.log(&format!("Session created (over pipe): {}", session_id));
+            if is_agent_pane {
+                let pane_session_id = std::env::var("WT_SESSION").unwrap_or_default();
+                let pane_for_index = if pane_session_id.is_empty() {
+                    None
+                } else {
+                    Some(pane_session_id.as_str())
+                };
+                tracing::info!(
+                    target: "agent_pane_origin",
+                    session_id = %session_id,
+                    pane_session_id = %pane_session_id,
+                    "recording agent-pane session origin (startup over pipe)",
+                );
+                record_agent_pane_origin(&state, session_id.0.as_ref(), pane_for_index);
+            }
+
+            let (available_models, current_model_id) =
+                crate::protocol::acp::model_select::models_from_new_session(&session);
+            record_native_yolo(&session, &state);
+            let session_config = session
+                .config_options
+                .as_deref()
+                .map(crate::protocol::acp::session_config::select_options)
+                .unwrap_or_default();
+            (
+                session_id,
+                available_models,
+                current_model_id,
+                session_config,
+                true,
+            )
+        };
+
+    // Apply --acp-model if requested. Only valid when we actually have
+    // a bootstrap session to mutate; for the initial-load path the
+    // loaded session's model is whatever the agent stored — overriding
+    // it before the load completes would race the load itself.
+    if has_bootstrap {
+        if let Some(requested_model) = acp_model_override.filter(|s| !s.trim().is_empty()) {
+            let _ = event_tx.send(AppEvent::ConnectionStage(
+                t!(
+                    "connection.selecting_model",
+                    model = requested_model.as_str()
+                )
+                .into_owned(),
+            ));
+            startup_probe.log(&format!(
+                "Setting ACP session model to {} (over pipe)",
+                requested_model
+            ));
+            let model_result = crate::protocol::acp::model_select::apply_session_model(
+                &conn,
+                session_id.clone(),
+                requested_model.clone(),
+            )
+            .await;
+            match model_result {
+                Ok(config_options) => {
+                    if let Some(config_options) = config_options {
+                        (available_models, current_model_id) =
+                            crate::protocol::acp::model_select::models_from_config_options(
+                                session_id.0.as_ref(),
+                                &config_options,
+                            )
+                            .unwrap_or_default();
+                        session_config =
+                            crate::protocol::acp::session_config::select_options(&config_options);
+                        current_model_id.get_or_insert_with(|| requested_model.clone());
+                    } else {
+                        current_model_id = Some(requested_model.clone());
+                    }
+                    startup_probe.log(&format!(
+                        "ACP session model set to {} (over pipe)",
+                        requested_model
+                    ));
+                }
+                Err(error) if is_redundant_startup_model_error(&prompt_usage_identity, &error) => {
+                    tracing::warn!(
+                        target: "helper",
+                        model = %requested_model,
+                        "Gemini CLI does not implement session/set_model; using the model already supplied on its launch command"
+                    );
+                    startup_probe.log(&format!(
+                        "Gemini startup model {} already applied by launch command",
+                        requested_model
+                    ));
+                    current_model_id = Some(requested_model.clone());
+                }
+                Err(error) => {
+                    return Err(anyhow::anyhow!(
+                        "failed to set requested model {}: {}",
+                        requested_model,
+                        error
+                    ));
+                }
+            }
+        }
+    }
+
+    // Notify app of connection. No raw `program/args` to summarise in
+    // helper mode — pull what the master/agent advertised via `init_resp`.
+    let agent_version = init_resp
+        .agent_info
+        .as_ref()
+        .map(|info| format!("v{}", info.version));
+    let agent_name = init_resp
+        .agent_info
+        .as_ref()
+        .and_then(|info| info.title.clone().or_else(|| Some(info.name.clone())))
+        .unwrap_or_else(|| "wta-master".to_string());
+    let load_session_supported = init_resp.agent_capabilities.load_session;
+    let image_supported = init_resp.agent_capabilities.prompt_capabilities.image;
+    startup_probe.log(&format!(
+        "Agent capabilities (over pipe): loadSession={} image={}",
+        load_session_supported, image_supported
+    ));
+    let _ = event_tx.send(AppEvent::AgentConnected {
+        name: agent_name,
+        // We have no `--agent` cmdline to mine a model identifier
+        // from; the per-session `current_model_id` covers the UI.
+        model: None,
+        version: agent_version,
+        session_id: session_id.to_string(),
+        available_models,
+        current_model_id,
+        load_session_supported,
+        image_supported,
+        session_capabilities_ready: has_bootstrap,
+        telemetry_byok_binding,
+    });
+    for option in &mut session_config {
+        option.native_yolo = state
+            .native_yolo
+            .is_native_config_option(&session_id, &option.id);
+    }
+    let _ = event_tx.send(AppEvent::SessionConfigUpdated {
+        session_id: session_id.to_string(),
+        options: session_config,
+    });
+    // Per-tab session cache. Only
+    // prepopulate the owner-tab binding when we actually have a
+    // bootstrap session — otherwise the `load_session_rx` arm would
+    // see the placeholder sid as a prior session, try to `cancel` it,
+    // and the agent CLI would reject the cancel for an unknown sid.
+    // With no entry, the load arm sees `old_sid = None` and loads
+    // cleanly.
+    let tab_to_session: Arc<tokio::sync::Mutex<HashMap<String, acp::schema::v1::SessionId>>> =
+        Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+    if has_bootstrap {
+        let mut g = tab_to_session.lock().await;
+        let initial_tab_key = owner_tab_id.clone().unwrap_or_else(|| "0".to_string());
+        g.insert(initial_tab_key, session_id.clone());
+    }
+
+    let template_memo = TemplateMemo::default();
+    let in_flight_tabs: SharedInFlightPrompts = Arc::new(std::sync::Mutex::new(HashMap::new()));
+    let tab_aliases: SharedTabAliases = Arc::new(std::sync::Mutex::new(HashMap::new()));
+    let tab_binding_generations: SharedTabBindingGenerations =
+        Arc::new(std::sync::Mutex::new(HashMap::new()));
+    let mut prompt_tasks: Vec<PromptTask> = Vec::new();
+    let mut lifecycle_tasks: Vec<LifecycleTask> = Vec::new();
+
+    let conn = Arc::new(conn);
+
+    // The app applies this fallback only to open helper session views in
+    // nonvertical layouts. Master notifications remain independent of layout.
+    let mut periodic_refetch = tokio::time::interval(std::time::Duration::from_secs(60));
+    periodic_refetch.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // Burn the first tick (fires immediately on creation).
+    periodic_refetch.tick().await;
+
+    // Main event loop. The select arms are extracted into `dispatch_*`
+    // free fns (so they're unit-testable). No restart-loop wrapper here:
+    // helper mode can't restart the master in-process, so `/restart` asks C++
+    // to replace it. The retained helper reconnects when the old pipe closes.
+    loop {
+        tokio::select! {
+            biased;
+            _ = periodic_refetch.tick() => {
+                let _ = event_tx.send(AppEvent::SessionsFallbackTick);
+            }
+            Some(event) = session_hook_rx.recv() => {
+                let conn_for_hook = conn.clone();
+                lifecycle_tasks.retain(|task| !task.is_finished());
+                lifecycle_tasks.push(tokio::task::spawn_local(async move {
+                    let req = crate::session_registry::build_session_hook_request(&event);
+                    match conn_for_hook.ext_method(req).await {
+                        Ok(response) => tracing::debug!(
+                            target: "session_hook",
+                            event = ?event,
+                            response = %response.0.get(),
+                            "session_hook sent to master"
+                        ),
+                        Err(err) => tracing::warn!(
+                            target: "session_hook",
+                            event = ?event,
+                            error = ?err,
+                            "session_hook ext-request to master failed"
+                        ),
+                    }
+                }));
+            }
+            Some(req) = master_ext_rx.recv() => {
+                lifecycle_tasks.retain(|task| !task.is_finished());
+                lifecycle_tasks.push(dispatch_master_ext_request(
+                    req,
+                    &conn,
+                    &event_tx,
+                    &tab_to_session,
+                    Arc::clone(&state),
+                ));
+            }
+            Some(req) = restart_rx.recv() => {
+                match req {
+                    AgentLifecycleRequest::RestartMaster => {
+                        // Helper can't restart the shared master in-process.
+                        tracing::info!(
+                            target: "helper",
+                            "restart requested — asking WT to replace the shared master"
+                        );
+                        crate::wt_protocol_events::send(
+                            crate::wt_protocol_events::restart_agent_stack_event(),
+                        );
+                    }
+                    AgentLifecycleRequest::RebindAgent(request) => {
+                        tracing::info!(
+                            target: "helper",
+                            operation_id = %request.operation_id,
+                            generation = request.generation,
+                            agent_id = %request.agent_id,
+                            "ending helper ACP connection for Agent rebind"
+                        );
+                        intentional_shutdown.store(true, Ordering::Release);
+                        close_client_receivers(
+                            &mut prompt_rx,
+                            &mut new_session_rx,
+                            &mut load_session_rx,
+                            &mut drop_session_rx,
+                            &mut rename_session_rx,
+                            &mut restart_rx,
+                            &mut session_hook_rx,
+                            &mut master_ext_rx,
+                        );
+                        finalize_client_transport(
+                            &mut transport_guard,
+                            false,
+                            &mut prompt_tasks,
+                            &in_flight_tabs,
+                            &mut lifecycle_tasks,
+                        )
+                        .await;
+                        return Ok(AcpClientExit::RebindAgent(request));
+                    }
+                }
+            }
+            io_result = transport_guard.io_task_mut() => {
+                transport_guard.io_task_completed();
+                close_client_receivers(
+                    &mut prompt_rx,
+                    &mut new_session_rx,
+                    &mut load_session_rx,
+                    &mut drop_session_rx,
+                    &mut rename_session_rx,
+                    &mut restart_rx,
+                    &mut session_hook_rx,
+                    &mut master_ext_rx,
+                );
+                let (exit, report_master_disconnect) =
+                    complete_transport_io_task(io_result, &intentional_shutdown);
+                finalize_client_transport(
+                    &mut transport_guard,
+                    report_master_disconnect,
+                    &mut prompt_tasks,
+                    &in_flight_tabs,
+                    &mut lifecycle_tasks,
+                )
+                .await;
+                startup_probe.log("run_acp_client_over_pipe transport ended");
+                return Ok(exit);
+            }
+            Some(req) = rename_session_rx.recv() => {
+                dispatch_rename_session_with_aliases(
+                    req,
+                    &tab_to_session,
+                    &in_flight_tabs,
+                    &tab_aliases,
+                    &tab_binding_generations,
+                ).await;
+            }
+            Some(req) = new_session_rx.recv() => {
+                lifecycle_tasks.retain(|task| !task.is_finished());
+                lifecycle_tasks.push(dispatch_new_session_with_aliases(
+                    req,
+                    &conn,
+                    &tab_to_session,
+                    &tab_aliases,
+                    &tab_binding_generations,
+                    &template_memo,
+                    &event_tx,
+                    Arc::clone(&state),
+                    is_agent_pane,
+                    true,
+                    "HelperPipeNewSessionForTab",
+                    &proposal_channels,
+                    proposal_commands_supported,
+                ));
+            }
+            Some(req) = load_session_rx.recv() => {
+                lifecycle_tasks.retain(|task| !task.is_finished());
+                lifecycle_tasks.push(dispatch_load_session_with_aliases(
+                    req,
+                    &conn,
+                    &tab_to_session,
+                    &tab_aliases,
+                    &tab_binding_generations,
+                    &event_tx,
+                    Arc::clone(&state),
+                    true,
+                    true,
+                    std::time::Duration::from_secs(60),
+                    &proposal_channels,
+                    proposal_commands_supported,
+                ));
+            }
+            Some(req) = drop_session_rx.recv() => {
+                if let Some(task) = dispatch_drop_session_with_aliases(
+                    req,
+                    &conn,
+                    &tab_to_session,
+                    &tab_aliases,
+                    &tab_binding_generations,
+                    &template_memo,
+                    &state,
+                ).await {
+                    lifecycle_tasks.retain(|task| !task.is_finished());
+                    lifecycle_tasks.push(task);
+                }
+            }
+            Some(prompt) = prompt_rx.recv() => {
+                prompt_tasks.retain(|task| !task.handle.is_finished());
+                if let Some(task) = dispatch_prompt_with_aliases(
+                    prompt,
+                    &conn,
+                    &tab_to_session,
+                    &template_memo,
+                    &in_flight_tabs,
+                    &tab_aliases,
+                    &tab_binding_generations,
+                    &event_tx,
+                    &shell_mgr,
+                    &prompt_timing,
+                    &client,
+                    &prompt_usage_identity,
+                    wt_connected,
+                    is_agent_pane,
+                    proposal_commands_supported,
+                    &proposal_channels,
+                ) {
+                    prompt_tasks.push(task);
+                }
+            }
+            else => break,
+        }
+    }
+
+    intentional_shutdown.store(true, Ordering::Release);
+    close_client_receivers(
+        &mut prompt_rx,
+        &mut new_session_rx,
+        &mut load_session_rx,
+        &mut drop_session_rx,
+        &mut rename_session_rx,
+        &mut restart_rx,
+        &mut session_hook_rx,
+        &mut master_ext_rx,
+    );
+    finalize_client_transport(
+        &mut transport_guard,
+        false,
+        &mut prompt_tasks,
+        &in_flight_tabs,
+        &mut lifecycle_tasks,
+    )
+    .await;
+    startup_probe.log("run_acp_client_over_pipe loop ended");
+    Ok(AcpClientExit::ChannelsClosed)
+}
+
+/// Spawn a per-prompt task that resolves the tab's ACP session (lazily
+/// creating one if needed), instruments timing, runs `conn.prompt`, and
+/// cleans up state on completion. Extracted from the old inline body in
+/// the prompt while-loop so the new select-based loop body stays terse.
+#[allow(clippy::too_many_arguments)]
+fn dispatch_master_ext_request(
+    req: MasterExtRequest,
+    conn: &conn::ClientLink,
+    event_tx: &mpsc::UnboundedSender<AppEvent>,
+    tab_to_session: &Arc<tokio::sync::Mutex<HashMap<String, acp::schema::v1::SessionId>>>,
+    client_state: Arc<ClientState>,
+) -> LifecycleTask {
+    dispatch_master_ext_request_with_yolo_timeout(
+        req,
+        conn,
+        event_tx,
+        tab_to_session,
+        client_state,
+        super::native_yolo::NATIVE_YOLO_RPC_TIMEOUT,
+    )
+}
+
+fn dispatch_master_ext_request_with_yolo_timeout(
+    req: MasterExtRequest,
+    conn: &conn::ClientLink,
+    event_tx: &mpsc::UnboundedSender<AppEvent>,
+    tab_to_session: &Arc<tokio::sync::Mutex<HashMap<String, acp::schema::v1::SessionId>>>,
+    client_state: Arc<ClientState>,
+    yolo_reconcile_timeout: std::time::Duration,
+) -> LifecycleTask {
+    let reserved_yolo_operations = match &req {
+        MasterExtRequest::ReconcileSessionYolo { sessions, .. } => sessions
+            .iter()
+            .map(|(session_id, enabled)| {
+                client_state
+                    .native_yolo
+                    .reserve_operation(session_id.clone(), *enabled)
+            })
+            .collect(),
+        MasterExtRequest::SetSessionConfigOption {
+            session_id,
+            config_id,
+            value,
+        } => client_state
+            .native_yolo
+            .native_config_selection(session_id, config_id, value)
+            .map(|enabled| {
+                vec![client_state
+                    .native_yolo
+                    .reserve_operation(session_id.clone(), enabled)]
+            })
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    };
+    let conn = conn.clone();
+    let event_tx = event_tx.clone();
+    let tab_to_session = Arc::clone(tab_to_session);
+    tokio::task::spawn_local(async move {
+        match req {
+            MasterExtRequest::SessionsList { request_id, rescan } => {
+                let wire = crate::session_registry::build_sessions_list_request(rescan);
+                // Bound stalled responses so refetch_in_flight cannot suppress
+                // every later request indefinitely. Eight seconds allows the
+                // bound-agent rescan's five-second timeout plus local IPC overhead.
+                // Without a push, a nonvertical view may need this timeout plus
+                // the next 60-second fallback (up to about 68 seconds) to recover.
+                // Vertical helper views instead rely on pushes or explicit reads.
+                const SESSIONS_LIST_TIMEOUT: std::time::Duration =
+                    std::time::Duration::from_secs(8);
+                let result =
+                    tokio::time::timeout(SESSIONS_LIST_TIMEOUT, conn.ext_method(wire)).await;
+                match result {
+                    Ok(Ok(resp)) => {
+                        let sessions =
+                            crate::session_registry::parse_sessions_list_response(&resp.0)
+                                .map(|r| r.sessions)
+                                .unwrap_or_default();
+                        let _ = event_tx.send(AppEvent::AgentsSnapshotLoaded {
+                            request_id,
+                            sessions,
+                        });
+                    }
+                    Ok(Err(err)) => {
+                        tracing::warn!(
+                            target: "agents_view",
+                            request_id,
+                            error = ?err,
+                            "sessions/list ext-request failed"
+                        );
+                        let _ = event_tx.send(AppEvent::AgentsSnapshotFailed { request_id });
+                    }
+                    Err(_elapsed) => {
+                        tracing::warn!(
+                            target: "agents_view",
+                            request_id,
+                            timeout_secs = SESSIONS_LIST_TIMEOUT.as_secs(),
+                            "sessions/list timed out — likely ACP-0.10 \
+                             cancellation-safety bug; unblocking refetch_in_flight \
+                             so the fallback tick can retry"
+                        );
+                        let _ = event_tx.send(AppEvent::AgentsSnapshotFailed { request_id });
+                    }
+                }
+            }
+            MasterExtRequest::SessionBornBound { event } => {
+                const BORN_BOUND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
+                let wire = crate::session_registry::build_born_bound_request(&event);
+                match tokio::time::timeout(BORN_BOUND_TIMEOUT, conn.ext_method(wire)).await {
+                    Ok(Ok(response)) => tracing::debug!(
+                        target: "session_hook",
+                        event = ?event,
+                        response = %response.0.get(),
+                        "born-bound registration sent to master"
+                    ),
+                    Ok(Err(err)) => tracing::warn!(
+                        target: "session_hook",
+                        event = ?event,
+                        error = ?err,
+                        "born-bound registration ext-request failed"
+                    ),
+                    Err(_) => tracing::warn!(
+                        target: "session_hook",
+                        event = ?event,
+                        timeout_secs = BORN_BOUND_TIMEOUT.as_secs(),
+                        "born-bound registration timed out"
+                    ),
+                }
+            }
+            MasterExtRequest::SessionResumeDispatched { request_id, sid } => {
+                let wire = crate::session_registry::build_session_resume_dispatched_request(&sid);
+                match conn.ext_method(wire).await {
+                    Ok(resp) => {
+                        let _ = crate::session_registry::parse_session_resume_dispatched_response(
+                            &resp.0,
+                        );
+                    }
+                    Err(err) => {
+                        tracing::warn!(target: "agents_view", request_id, session_id = %sid.0, error = ?err, "session_resume_dispatched ext-request failed");
+                    }
+                }
+                let _ = event_tx.send(AppEvent::MasterMutationCompleted { request_id });
+            }
+            MasterExtRequest::SessionFocus { request_id, sid } => {
+                let wire = crate::session_registry::build_session_focus_request(&sid);
+                match conn.ext_method(wire).await {
+                    Ok(resp) => {
+                        let _ = crate::session_registry::parse_session_focus_response(&resp.0);
+                    }
+                    Err(err) => {
+                        tracing::warn!(target: "agents_view", request_id, session_id = %sid.0, error = ?err, "session_focus ext-request failed");
+                    }
+                }
+                let _ = event_tx.send(AppEvent::MasterMutationCompleted { request_id });
+            }
+            MasterExtRequest::SetSessionModel {
+                request_id,
+                session_id,
+                model,
+                pane_override,
+            } => {
+                // Apply to the targeted session, or to every live session
+                // this helper owns when no target is given (normally just the
+                // one bound to its owner tab). Best-effort: a failure on one
+                // session is logged, not fatal — the next prompt still works
+                // on the previously-selected model.
+                let sessions: Vec<acp::schema::v1::SessionId> = {
+                    let g = tab_to_session.lock().await;
+                    match &session_id {
+                        Some(target) => g.values().filter(|s| *s == target).cloned().collect(),
+                        None => g.values().cloned().collect(),
+                    }
+                };
+                // A targeted update that matches no live session is a silent
+                // no-op the UI can't see — surface it so a stale session id
+                // (e.g. a race with `/new`) is diagnosable instead of the UI
+                // claiming the model changed when nothing happened.
+                if let Some(target) = &session_id {
+                    if sessions.is_empty() {
+                        tracing::warn!(
+                            target: "acp",
+                            session_id = %target.0,
+                            model = %model,
+                            "set_session_model targeted an unknown/stale session; no live session updated"
+                        );
+                        let _ = event_tx.send(AppEvent::ModelSetFailed {
+                            request_id,
+                            session_id: target.to_string(),
+                            model: model.clone(),
+                            pane_override,
+                            message: "the session is no longer active".to_string(),
+                        });
+                    }
+                }
+                for sid in sessions {
+                    match crate::protocol::acp::model_select::apply_session_model(
+                        &conn,
+                        sid.clone(),
+                        model.clone(),
+                    )
+                    .await
+                    {
+                        Ok(config_options) => {
+                            if let Some(config_options) = config_options {
+                                let (available_models, current_model_id) =
+                                    crate::protocol::acp::model_select::models_from_config_options(
+                                        sid.0.as_ref(),
+                                        &config_options,
+                                    )
+                                    .unwrap_or_default();
+                                publish_session_config_options(
+                                    &event_tx,
+                                    &client_state.native_yolo,
+                                    &sid,
+                                    Some(&config_options),
+                                );
+                                let _ = event_tx.send(AppEvent::ModelConfigUpdated {
+                                    session_id: sid.to_string(),
+                                    available_models,
+                                    current_model_id,
+                                });
+                            }
+                            let _ = event_tx.send(AppEvent::ModelSetCompleted {
+                                request_id,
+                                session_id: sid.to_string(),
+                                model: model.clone(),
+                                pane_override,
+                            });
+                            tracing::info!(
+                                target: "acp",
+                                session_id = %sid.0,
+                                model = %model,
+                                "acp-model hot-applied to live session"
+                            );
+                        }
+                        Err(err) => {
+                            tracing::warn!(
+                                target: "acp",
+                                session_id = %sid.0,
+                                model = %model,
+                                error = ?err,
+                                "model hot-update failed"
+                            );
+                            let _ = event_tx.send(AppEvent::ModelSetFailed {
+                                request_id,
+                                session_id: sid.to_string(),
+                                model: model.clone(),
+                                pane_override,
+                                message: err.to_string(),
+                            });
+                        }
+                    }
+                }
+            }
+            MasterExtRequest::ReconcileSessionYolo {
+                reconcile_id,
+                sessions,
+                fail_closed,
+            } => {
+                let reconcile = async {
+                    let mut failure = None;
+                    for ((session_id, enabled), operation) in
+                        sessions.into_iter().zip(reserved_yolo_operations)
+                    {
+                        match apply_native_yolo_checked(
+                            &conn,
+                            &client_state,
+                            operation.clone(),
+                            yolo_reconcile_timeout,
+                        )
+                        .await
+                        {
+                            Ok(config_options) => {
+                                if !publish_current_native_config_options(
+                                    &event_tx,
+                                    &client_state.native_yolo,
+                                    &session_id,
+                                    &operation,
+                                    config_options.as_deref(),
+                                ) {
+                                    continue;
+                                }
+                                tracing::info!(
+                                    target: "acp",
+                                    session_id = %session_id.0,
+                                    enabled,
+                                    "provider-native Yolo updated for live session"
+                                );
+                            }
+                            Err(error) => {
+                                let error = if enabled {
+                                    error
+                                } else {
+                                    // A rejected disable does not attest that
+                                    // the provider left its privileged mode.
+                                    error.requiring_restart()
+                                };
+                                tracing::warn!(
+                                    target: "acp",
+                                    session_id = %session_id.0,
+                                    enabled,
+                                    error = %error,
+                                    "provider-native Yolo runtime reconciliation failed"
+                                );
+                                if fail_closed || error.restart_required() {
+                                    return Err(error);
+                                }
+                                failure.get_or_insert(error);
+                            }
+                        }
+                    }
+                    failure.map_or(Ok(()), Err)
+                };
+                let (result, restart_required) = if fail_closed {
+                    match tokio::time::timeout(yolo_reconcile_timeout, reconcile).await {
+                        Ok(result) => {
+                            let restart_required = result
+                                .as_ref()
+                                .err()
+                                .is_some_and(|error| error.restart_required());
+                            (result.map_err(|error| error.to_string()), restart_required)
+                        }
+                        Err(_) => (
+                            Err(format!(
+                                "provider-native Yolo reconciliation timed out after {yolo_reconcile_timeout:?}"
+                            )),
+                            true,
+                        ),
+                    }
+                } else {
+                    let result = reconcile.await;
+                    let restart_required = result
+                        .as_ref()
+                        .err()
+                        .is_some_and(|error| error.restart_required());
+                    (result.map_err(|error| error.to_string()), restart_required)
+                };
+                let _ = event_tx.send(AppEvent::RuntimeYoloReconcileCompleted {
+                    reconcile_id,
+                    fail_closed,
+                    restart_required,
+                    result,
+                });
+            }
+            MasterExtRequest::SetSessionConfigOption {
+                session_id,
+                config_id,
+                value,
+            } => {
+                let is_live = {
+                    let sessions = tab_to_session.lock().await;
+                    sessions.values().any(|known| known == &session_id)
+                };
+                if !is_live {
+                    let _ = event_tx.send(AppEvent::SessionConfigSetFailed {
+                        session_id: session_id.to_string(),
+                        config_id,
+                        message: "the session is no longer active".to_string(),
+                        restart_required: false,
+                    });
+                    return;
+                }
+
+                let native_operation = reserved_yolo_operations.into_iter().next().or_else(|| {
+                    client_state
+                        .native_yolo
+                        .native_config_selection(&session_id, &config_id, &value)
+                        .map(|enabled| {
+                            client_state
+                                .native_yolo
+                                .reserve_operation(session_id.clone(), enabled)
+                        })
+                });
+                if let Some(operation) = native_operation {
+                    let enabled = operation.enabled();
+                    let disabling_native_yolo = !enabled;
+                    let publication_operation = operation.clone();
+                    match client_state
+                        .native_yolo
+                        .apply_native_config_reserved_with_policy_timeout(
+                            &conn,
+                            operation,
+                            &config_id,
+                            &value,
+                            &client_state.yolo_state,
+                            yolo_reconcile_timeout,
+                        )
+                        .await
+                    {
+                        Ok(Some(config_options)) => {
+                            if !publish_current_native_config_options(
+                                &event_tx,
+                                &client_state.native_yolo,
+                                &session_id,
+                                &publication_operation,
+                                Some(&config_options),
+                            ) {
+                                let _ = event_tx.send(AppEvent::SessionConfigSetFailed {
+                                    session_id: session_id.to_string(),
+                                    config_id,
+                                    message:
+                                        "the config update was superseded by newer session state"
+                                            .to_string(),
+                                    restart_required: false,
+                                });
+                            } else {
+                                let owner_changed = client_state
+                                    .yolo_state
+                                    .lock()
+                                    .unwrap()
+                                    .mark_manual_if_allowed(session_id.to_string());
+                                if owner_changed {
+                                    let _ = event_tx.send(AppEvent::YoloControlOwnerChanged {
+                                        session_id: session_id.to_string(),
+                                    });
+                                }
+                                let _ = event_tx.send(AppEvent::SessionConfigSetCompleted {
+                                    session_id: session_id.to_string(),
+                                    config_id,
+                                    value,
+                                    model_compat: false,
+                                });
+                            }
+                        }
+                        Ok(None) => {
+                            let _ = event_tx.send(AppEvent::SessionConfigSetFailed {
+                                session_id: session_id.to_string(),
+                                config_id,
+                                message: "the config update was superseded by newer session state"
+                                    .to_string(),
+                                restart_required: false,
+                            });
+                        }
+                        Err(error) => {
+                            // Any failed disable leaves the provider's actual
+                            // privilege state unknown, even for an ordinary ACP
+                            // rejection rather than a transport timeout.
+                            if disabling_native_yolo || error.restart_required() {
+                                let _ = event_tx.send(AppEvent::RuntimeYoloReconcileCompleted {
+                                    reconcile_id: 0,
+                                    fail_closed: disabling_native_yolo,
+                                    restart_required: true,
+                                    result: Err(error.to_string()),
+                                });
+                            }
+                            let _ = event_tx.send(AppEvent::SessionConfigSetFailed {
+                                session_id: session_id.to_string(),
+                                config_id,
+                                message: error.to_string(),
+                                restart_required: disabling_native_yolo || error.restart_required(),
+                            });
+                        }
+                    }
+                    return;
+                }
+
+                let model_compat = crate::protocol::acp::model_select::is_model_config(
+                    session_id.0.as_ref(),
+                    &config_id,
+                );
+                let result = if model_compat {
+                    crate::protocol::acp::model_select::apply_session_model(
+                        &conn,
+                        session_id.clone(),
+                        value.clone(),
+                    )
+                    .await
+                } else {
+                    let request = acp::schema::v1::SetSessionConfigOptionRequest::new(
+                        session_id.clone(),
+                        config_id.clone(),
+                        value.as_str(),
+                    );
+                    conn.set_session_config_option(request)
+                        .await
+                        .map(|response| Some(response.config_options))
+                };
+                match result {
+                    Ok(config_options) => {
+                        if let Some(config_options) = config_options {
+                            client_state
+                                .native_yolo
+                                .record_from_config_update(&session_id, &config_options);
+                            let (available_models, current_model_id) =
+                                crate::protocol::acp::model_select::models_from_config_options(
+                                    session_id.0.as_ref(),
+                                    &config_options,
+                                )
+                                .unwrap_or_default();
+                            publish_session_config_options(
+                                &event_tx,
+                                &client_state.native_yolo,
+                                &session_id,
+                                Some(&config_options),
+                            );
+                            let _ = event_tx.send(AppEvent::ModelConfigUpdated {
+                                session_id: session_id.to_string(),
+                                available_models,
+                                current_model_id,
+                            });
+                        }
+                        let _ = event_tx.send(AppEvent::SessionConfigSetCompleted {
+                            session_id: session_id.to_string(),
+                            config_id,
+                            value,
+                            model_compat,
+                        });
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            target: "acp",
+                            session_id = %session_id,
+                            config_id,
+                            value,
+                            error = ?error,
+                            "session config update failed"
+                        );
+                        let _ = event_tx.send(AppEvent::SessionConfigSetFailed {
+                            session_id: session_id.to_string(),
+                            config_id,
+                            message: error.to_string(),
+                            restart_required: false,
+                        });
+                    }
+                }
+            }
+        }
+    })
+}
+
+/// Resume a historical agent session for a tab via ACP `session/load`
+/// (the session-management Enter resume path). Drops any existing binding,
+/// calls `load_session` under a timeout, and
+/// on success rebinds the tab and emits `SessionAttached` +
+/// `TabSystemMessage`. Called by `run_acp_client_over_pipe`.
+///
+/// `inject_pane_meta` injects WT_SESSION into the request meta so master
+/// records `pane_session_id` on the resumed row.
+/// `use_load_failure_handler` selects the richer [`handle_load_failure`]
+/// (restore prior binding / boot-time fallback `new_session`); when
+/// `false`, a load failure instead surfaces a plain `TabError`.
+/// `timeout` bounds the `session/load` call (60s in production; injectable
+/// for tests).
+#[allow(clippy::too_many_arguments)]
+fn dispatch_load_session_with_aliases(
+    req: LoadSessionForTab,
+    conn: &conn::ClientLink,
+    tab_to_session: &Arc<tokio::sync::Mutex<HashMap<String, acp::schema::v1::SessionId>>>,
+    tab_aliases: &SharedTabAliases,
+    tab_binding_generations: &SharedTabBindingGenerations,
+    event_tx: &mpsc::UnboundedSender<AppEvent>,
+    client_state: Arc<ClientState>,
+    inject_pane_meta: bool,
+    use_load_failure_handler: bool,
+    timeout: std::time::Duration,
+    proposal_channels: &Arc<crate::agent_tools::action_proposal::channel::ProposalChannelManager>,
+    proposal_mcp_enabled: bool,
+) -> LifecycleTask {
+    tracing::info!(
+        target: "acp_load_session",
+        tab = %req.tab_id,
+        session_id = %req.session_id,
+        inject_pane_meta,
+        use_load_failure_handler,
+        timeout_ms = timeout.as_millis() as u64,
+        "load_session requested"
+    );
+    let conn = conn.clone();
+    let tab_to_session = Arc::clone(tab_to_session);
+    let tab_aliases = Arc::clone(tab_aliases);
+    let tab_binding_generations = Arc::clone(tab_binding_generations);
+    let event_tx = event_tx.clone();
+    let proposal_channels = Arc::clone(proposal_channels);
+    let (request_tab_id, binding_generation) =
+        begin_tab_binding_operation(&tab_aliases, &tab_binding_generations, &req.tab_id);
+    tokio::task::spawn_local(async move {
+        let cwd = req
+            .cwd
+            .clone()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+
+        // If the target tab already holds a session, drop the binding — the
+        // App has synchronously cancelled that prompt's scoped token before
+        // requesting this lifecycle transition.
+        let old_sid = {
+            let mut g = tab_to_session.lock().await;
+            g.remove(&request_tab_id)
+        };
+
+        let session_id = acp::schema::v1::SessionId::new(req.session_id.clone());
+        let mut load_req =
+            acp::schema::v1::LoadSessionRequest::new(session_id.clone(), cwd.clone());
+        // Tell master which WT pane owns the session we're about to
+        // rehydrate, so the registry row for the resumed sid carries
+        // `pane_session_id = <this pane's GUID>` and cross-helper Focus
+        // actions can resolve to a real WT pane. Only the helper path
+        // needs this.
+        if inject_pane_meta {
+            inject_wta_pane_meta(&mut load_req.meta, proposal_mcp_enabled);
+        }
+        // `session/load` may replay history before returning, so on large
+        // session stores the call can take a while; the timeout ceiling
+        // keeps us from hanging forever if the agent never responds.
+        let load_started = std::time::Instant::now();
+        let load_result = tokio::time::timeout(timeout, conn.load_session(load_req)).await;
+        crate::telemetry::log_acp_load_session_complete(
+            elapsed_ms_since(load_started),
+            matches!(load_result, Ok(Ok(_))),
+        );
+
+        match load_result {
+            Ok(Ok(mut resp)) => {
+                if take_retired_session_result(&mut resp.meta) {
+                    tracing::info!(
+                        target: "acp_load_session",
+                        tab = %req.tab_id,
+                        session_id = %req.session_id,
+                        "ignoring session/load result retired during tab reset or close"
+                    );
+                    return;
+                }
+                let Some(current_tab_id) = current_tab_binding_operation(
+                    &tab_aliases,
+                    &tab_binding_generations,
+                    &request_tab_id,
+                    binding_generation,
+                ) else {
+                    return;
+                };
+                tracing::info!(
+                    target: "acp_load_session",
+                    tab = %req.tab_id,
+                    session_id = %req.session_id,
+                    "load_session succeeded"
+                );
+                tab_to_session
+                    .lock()
+                    .await
+                    .insert(current_tab_id.clone(), session_id.clone());
+                if let Some(old) = old_sid
+                    .as_ref()
+                    .filter(|old| old.0.as_ref() != session_id.0.as_ref())
+                {
+                    crate::protocol::acp::model_select::forget_session(old.0.as_ref());
+                    client_state.native_yolo.forget_session(old);
+                    client_state.prompt_timing.forget_session(old.0.as_ref());
+                }
+                client_state
+                    .native_yolo
+                    .record_from_load_session(&session_id, &resp);
+                // The agent replays past content via session/update
+                // notifications that route through the existing
+                // session_to_tab map. SessionAttached primes that mapping.
+                let (available_models, current_model_id) =
+                    crate::protocol::acp::model_select::models_from_load_session(
+                        session_id.0.as_ref(),
+                        &resp,
+                    );
+                // No "Session loaded" note is added to the transcript: the
+                // restored conversation speaks for itself, and the in-pane
+                // resuming indicator ends when this event clears
+                // `loading_session`.
+                let _ = event_tx.send(AppEvent::SessionAttached {
+                    tab_id: current_tab_id,
+                    session_id: session_id.to_string(),
+                    prompt_id: None,
+                    available_models,
+                    current_model_id,
+                });
+                publish_session_config_options(
+                    &event_tx,
+                    &client_state.native_yolo,
+                    &session_id,
+                    resp.config_options.as_deref(),
+                );
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(
+                    target: "acp_load_session",
+                    tab = %req.tab_id,
+                    session_id = %req.session_id,
+                    error = ?e,
+                    "load_session failed"
+                );
+                let message = format!(
+                    "Failed to resume session in agent pane: {}. \
+                     The connected agent may not recognize this \
+                     session id (CLI mismatch), or `session/load` \
+                     is unsupported.",
+                    e
+                );
+                dispatch_load_failure(
+                    use_load_failure_handler,
+                    old_sid.as_ref(),
+                    req.session_id.to_string(),
+                    &request_tab_id,
+                    binding_generation,
+                    &cwd,
+                    &conn,
+                    &tab_to_session,
+                    &tab_binding_generations,
+                    &event_tx,
+                    message,
+                    &proposal_channels,
+                    proposal_mcp_enabled,
+                    Arc::clone(&client_state),
+                    Arc::clone(&tab_aliases),
+                )
+                .await;
+            }
+            Err(_) => {
+                tracing::warn!(
+                    target: "acp_load_session",
+                    tab = %req.tab_id,
+                    session_id = %req.session_id,
+                    "load_session timed out"
+                );
+                let human_timeout = if timeout.as_secs() >= 1 {
+                    format!("{}s", timeout.as_secs())
+                } else {
+                    format!("{}ms", timeout.as_millis())
+                };
+                let message = format!(
+                    "Resume timed out after {human_timeout} — the agent \
+                     did not respond to `session/load`."
+                );
+                dispatch_load_failure(
+                    use_load_failure_handler,
+                    old_sid.as_ref(),
+                    req.session_id.to_string(),
+                    &request_tab_id,
+                    binding_generation,
+                    &cwd,
+                    &conn,
+                    &tab_to_session,
+                    &tab_binding_generations,
+                    &event_tx,
+                    message,
+                    &proposal_channels,
+                    proposal_mcp_enabled,
+                    Arc::clone(&client_state),
+                    Arc::clone(&tab_aliases),
+                )
+                .await;
+            }
+        }
+    })
+}
+
+/// Failure-strategy switch for [`dispatch_load_session`]: the helper path
+/// uses the richer [`handle_load_failure`] (restore prior binding /
+/// boot-time fallback `new_session`); the direct path surfaces a plain
+/// `TabError` routed to the specific tab.
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_load_failure(
+    use_load_failure_handler: bool,
+    old_sid: Option<&acp::schema::v1::SessionId>,
+    failed_sid: String,
+    tab_id: &str,
+    binding_generation: u64,
+    cwd: &std::path::Path,
+    conn: &conn::ClientLink,
+    tab_to_session: &Arc<tokio::sync::Mutex<HashMap<String, acp::schema::v1::SessionId>>>,
+    tab_binding_generations: &SharedTabBindingGenerations,
+    event_tx: &mpsc::UnboundedSender<AppEvent>,
+    message: String,
+    proposal_channels: &Arc<crate::agent_tools::action_proposal::channel::ProposalChannelManager>,
+    proposal_mcp_enabled: bool,
+    client_state: Arc<ClientState>,
+    tab_aliases: SharedTabAliases,
+) {
+    if use_load_failure_handler {
+        handle_load_failure(
+            old_sid,
+            failed_sid,
+            tab_id.to_string(),
+            binding_generation,
+            cwd.to_path_buf(),
+            conn.clone(),
+            Arc::clone(tab_to_session),
+            Arc::clone(tab_binding_generations),
+            event_tx.clone(),
+            message,
+            Arc::clone(proposal_channels),
+            proposal_mcp_enabled,
+            client_state,
+            tab_aliases,
+        )
+        .await;
+    } else {
+        let Some(tab_id) = current_tab_binding_operation(
+            &tab_aliases,
+            tab_binding_generations,
+            tab_id,
+            binding_generation,
+        ) else {
+            return;
+        };
+        // TabError routes to the specific new tab (the historical session
+        // has no live session_id we could thread through AgentError, and
+        // AgentError with session_id=None would land in the currently-
+        // active tab instead).
+        let _ = event_tx.send(AppEvent::TabError { tab_id, message });
+    }
+}
+
+/// Spin up a fresh ACP session for a tab (the `/new` path), atomically
+/// replacing any existing session. Forgets the old session, calls
+/// `new_session`, records the agent-pane origin, rebinds the tab,
+/// and emits `SessionAttached` (or `AgentError` on failure). Called by
+/// `run_acp_client_over_pipe`.
+///
+/// `inject_pane_meta` controls whether WT_SESSION is injected into the
+/// request meta — the helper pipe path needs it so master can record
+/// `pane_session_id` on the registry row; the direct-agent path does not.
+/// `log_label` distinguishes the two paths in the timing log.
+#[allow(clippy::too_many_arguments)]
+fn dispatch_new_session_with_aliases(
+    req: NewSessionForTab,
+    conn: &conn::ClientLink,
+    tab_to_session: &Arc<tokio::sync::Mutex<HashMap<String, acp::schema::v1::SessionId>>>,
+    tab_aliases: &SharedTabAliases,
+    tab_binding_generations: &SharedTabBindingGenerations,
+    template_memo: &TemplateMemo,
+    event_tx: &mpsc::UnboundedSender<AppEvent>,
+    client_state: Arc<ClientState>,
+    is_agent_pane: bool,
+    inject_pane_meta: bool,
+    log_label: &'static str,
+    _proposal_channels: &Arc<crate::agent_tools::action_proposal::channel::ProposalChannelManager>,
+    proposal_mcp_enabled: bool,
+) -> LifecycleTask {
+    tracing::info!(
+        target: "acp_new_session",
+        tab = %req.tab_id,
+        "new_session requested"
+    );
+    let conn = conn.clone();
+    let tab_to_session = Arc::clone(tab_to_session);
+    let tab_aliases = Arc::clone(tab_aliases);
+    let tab_binding_generations = Arc::clone(tab_binding_generations);
+    let template_memo = template_memo.clone();
+    let event_tx = event_tx.clone();
+    let (request_tab_id, binding_generation) =
+        begin_tab_binding_operation(&tab_aliases, &tab_binding_generations, &req.tab_id);
+    tokio::task::spawn_local(async move {
+        let cwd = req
+            .cwd
+            .clone()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+
+        let old_sid = {
+            let mut g = tab_to_session.lock().await;
+            g.remove(&request_tab_id)
+        };
+
+        if let Some(ref old) = old_sid {
+            let old_str = old.to_string();
+            crate::protocol::acp::model_select::forget_session(&old_str);
+            client_state.native_yolo.forget_session(old);
+            client_state.prompt_timing.forget_session(&old_str);
+            template_memo.forget(&old_str).await;
+        }
+
+        // Inject WT_SESSION into the request meta so master can record
+        // pane_session_id on the registry row. Without this, focus_session
+        // RPCs against the new sid return {"focused": false, "reason":
+        // "no_pane"} because master has the row but no pane GUID to feed
+        // wtcli focus-pane. Only the helper pipe path needs this.
+        let mut new_session_req = acp::schema::v1::NewSessionRequest::new(cwd);
+        if inject_pane_meta {
+            inject_wta_pane_meta(&mut new_session_req.meta, proposal_mcp_enabled);
+        }
+        let new_session_started = std::time::Instant::now();
+        let new_session_result = conn.new_session(new_session_req).await;
+        log_acp_new_session_result(log_label, new_session_started, &new_session_result);
+        let mut new_session = match new_session_result {
+            Ok(s) => s,
+            Err(e) => {
+                let Some(current_tab_id) = current_tab_binding_operation(
+                    &tab_aliases,
+                    &tab_binding_generations,
+                    &request_tab_id,
+                    binding_generation,
+                ) else {
+                    return;
+                };
+                let _ = event_tx.send(AppEvent::TabError {
+                    tab_id: current_tab_id.clone(),
+                    message: format!("/new failed for tab {}: {}", current_tab_id, e),
+                });
+                return;
+            }
+        };
+        if take_retired_session_result(&mut new_session.meta) {
+            tracing::info!(
+                target: "acp_new_session",
+                tab = %req.tab_id,
+                session_id = %new_session.session_id,
+                "ignoring session/new result retired during tab reset or close"
+            );
+            return;
+        }
+        let Some(current_tab_id) = current_tab_binding_operation(
+            &tab_aliases,
+            &tab_binding_generations,
+            &request_tab_id,
+            binding_generation,
+        ) else {
+            return;
+        };
+
+        let new_sid = new_session.session_id.clone();
+        if is_agent_pane {
+            let pane_session_id = std::env::var("WT_SESSION").unwrap_or_default();
+            let pane_for_index = if pane_session_id.is_empty() {
+                None
+            } else {
+                Some(pane_session_id.as_str())
+            };
+            tracing::info!(
+                target: "agent_pane_origin",
+                session_id = %new_sid,
+                pane_session_id = %pane_session_id,
+                "recording agent-pane session origin (new_session_for_tab)",
+            );
+            record_agent_pane_origin(&client_state, new_sid.0.as_ref(), pane_for_index);
+        }
+        let (available_models, current_model_id) =
+            crate::protocol::acp::model_select::models_from_new_session(&new_session);
+        record_native_yolo(&new_session, &client_state);
+        tab_to_session
+            .lock()
+            .await
+            .insert(current_tab_id.clone(), new_sid.clone());
+
+        let _ = event_tx.send(AppEvent::SessionAttached {
+            tab_id: current_tab_id,
+            session_id: new_sid.to_string(),
+            prompt_id: None,
+            available_models,
+            current_model_id,
+        });
+        publish_session_config_options(
+            &event_tx,
+            &client_state.native_yolo,
+            &new_sid,
+            new_session.config_options.as_deref(),
+        );
+    })
+}
+
+/// Close a tab's ACP session without creating a replacement (tab close or
+/// Ctrl+C×2 close-pane path). Forgets its template memo and asks master to
+/// physically release the session through master's close-by-tab extension.
+/// No-op when the tab holds no session. Called by
+/// `run_acp_client_over_pipe`.
+async fn dispatch_drop_session_with_aliases(
+    req: DropSessionRequest,
+    conn: &conn::ClientLink,
+    tab_to_session: &Arc<tokio::sync::Mutex<HashMap<String, acp::schema::v1::SessionId>>>,
+    tab_aliases: &SharedTabAliases,
+    tab_binding_generations: &SharedTabBindingGenerations,
+    template_memo: &TemplateMemo,
+    client_state: &ClientState,
+) -> Option<LifecycleTask> {
+    let tab_id = invalidate_tab_binding(tab_aliases, tab_binding_generations, &req.tab_id);
+    tracing::info!(
+        target: "acp_drop_session",
+        tab = %tab_id,
+        "close session requested (no replacement)"
+    );
+    let old_sid = {
+        let mut sessions = tab_to_session.lock().await;
+        sessions.remove(&tab_id)
+    };
+    if let Some(old) = old_sid {
+        let old_str = old.to_string();
+        crate::protocol::acp::model_select::forget_session(&old_str);
+        client_state.native_yolo.forget_session(&old);
+        client_state.prompt_timing.forget_session(&old_str);
+        template_memo.forget(&old_str).await;
+    }
+
+    if !req.notify_master {
+        return None;
+    }
+
+    // The helper that owns the closing tab may be destroyed before it can
+    // process this event. Every surviving helper therefore asks master to
+    // resolve the stable tab id against its authoritative routing metadata.
+    // Duplicate requests are intentionally idempotent. Keep the bounded
+    // master RPC off the helper's main receive loop so sibling work remains
+    // responsive while the agent unwinds the cancelled turn.
+    let close_tab_request = crate::session_registry::build_close_tab_session_request(&tab_id);
+    let conn = conn.clone();
+    Some(tokio::task::spawn_local(async move {
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(18),
+            conn.ext_method(close_tab_request),
+        )
+        .await
+        {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => tracing::warn!(
+                target: "acp_drop_session",
+                tab = %tab_id,
+                error = ?error,
+                "master close-by-tab request failed"
+            ),
+            Err(_) => tracing::warn!(
+                target: "acp_drop_session",
+                tab = %tab_id,
+                "master close-by-tab request timed out"
+            ),
+        }
+    }))
+}
+
+/// Rekey the `tab_to_session` binding when WT mints a new stable tab id
+/// for an existing tab (cross-window tab drag). Extracted from the
+/// `rename_session_rx` arm of `run_acp_client_over_pipe`, so the rekey
+/// can be unit-tested against
+/// the shared map. No-op when `old_tab_id` is absent.
+async fn dispatch_rename_session_with_aliases(
+    req: RenameSessionRequest,
+    tab_to_session: &Arc<tokio::sync::Mutex<HashMap<String, acp::schema::v1::SessionId>>>,
+    in_flight_tabs: &SharedInFlightPrompts,
+    tab_aliases: &SharedTabAliases,
+    tab_binding_generations: &SharedTabBindingGenerations,
+) {
+    rename_helper_owner_tab_id(&req.old_tab_id, &req.new_tab_id);
+    let (old_tab_id, new_tab_id) = {
+        let mut aliases = tab_aliases.lock().unwrap();
+        let old_tab_id = resolve_tab_alias_locked(&aliases, &req.old_tab_id);
+        let new_tab_id = resolve_tab_alias_locked(&aliases, &req.new_tab_id);
+        aliases.insert(req.old_tab_id.clone(), new_tab_id.clone());
+        if old_tab_id != req.old_tab_id {
+            aliases.insert(old_tab_id.clone(), new_tab_id.clone());
+        }
+        (old_tab_id, new_tab_id)
+    };
+    let rekeyed_session = {
+        let mut sessions = tab_to_session.lock().await;
+        if let Some(session_id) = sessions.remove(&old_tab_id) {
+            sessions.insert(new_tab_id.clone(), session_id.clone());
+            Some(session_id)
+        } else {
+            None
+        }
+    };
+    {
+        let mut generations = tab_binding_generations.lock().unwrap();
+        let old_generation = generations.remove(&old_tab_id).unwrap_or_default();
+        let destination_generation = generations.remove(&new_tab_id).unwrap_or_default();
+        generations.insert(
+            new_tab_id.clone(),
+            old_generation.max(destination_generation),
+        );
+    }
+    let in_flight_rekeyed = {
+        let mut in_flight = in_flight_tabs.lock().unwrap();
+        if let Some(prompt_id) = in_flight.remove(&old_tab_id) {
+            in_flight
+                .entry(new_tab_id.clone())
+                .and_modify(|destination_id| *destination_id = (*destination_id).max(prompt_id))
+                .or_insert(prompt_id);
+            true
+        } else {
+            false
+        }
+    };
+    tracing::info!(
+        target: "acp_rename_session",
+        old_tab_id = %req.old_tab_id,
+        new_tab_id = %req.new_tab_id,
+        resolved_old_tab_id = %old_tab_id,
+        resolved_new_tab_id = %new_tab_id,
+        session_rekeyed = rekeyed_session.is_some(),
+        in_flight_rekeyed,
+        "prompt lifecycle state rekeyed via drag"
+    );
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn dispatch_load_session(
+    req: LoadSessionForTab,
+    conn: &conn::ClientLink,
+    tab_to_session: &Arc<tokio::sync::Mutex<HashMap<String, acp::schema::v1::SessionId>>>,
+    event_tx: &mpsc::UnboundedSender<AppEvent>,
+    client_state: Arc<ClientState>,
+    inject_pane_meta: bool,
+    use_load_failure_handler: bool,
+    timeout: std::time::Duration,
+    proposal_channels: &Arc<crate::agent_tools::action_proposal::channel::ProposalChannelManager>,
+    proposal_mcp_enabled: bool,
+) {
+    let tab_aliases = Arc::new(Mutex::new(HashMap::new()));
+    let tab_binding_generations = Arc::new(Mutex::new(HashMap::new()));
+    drop(dispatch_load_session_with_aliases(
+        req,
+        conn,
+        tab_to_session,
+        &tab_aliases,
+        &tab_binding_generations,
+        event_tx,
+        client_state,
+        inject_pane_meta,
+        use_load_failure_handler,
+        timeout,
+        proposal_channels,
+        proposal_mcp_enabled,
+    ));
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn dispatch_new_session(
+    req: NewSessionForTab,
+    conn: &conn::ClientLink,
+    tab_to_session: &Arc<tokio::sync::Mutex<HashMap<String, acp::schema::v1::SessionId>>>,
+    template_memo: &TemplateMemo,
+    event_tx: &mpsc::UnboundedSender<AppEvent>,
+    client_state: Arc<ClientState>,
+    is_agent_pane: bool,
+    inject_pane_meta: bool,
+    log_label: &'static str,
+    proposal_channels: &Arc<crate::agent_tools::action_proposal::channel::ProposalChannelManager>,
+    proposal_mcp_enabled: bool,
+) {
+    let tab_aliases = Arc::new(Mutex::new(HashMap::new()));
+    let tab_binding_generations = Arc::new(Mutex::new(HashMap::new()));
+    drop(dispatch_new_session_with_aliases(
+        req,
+        conn,
+        tab_to_session,
+        &tab_aliases,
+        &tab_binding_generations,
+        template_memo,
+        event_tx,
+        client_state,
+        is_agent_pane,
+        inject_pane_meta,
+        log_label,
+        proposal_channels,
+        proposal_mcp_enabled,
+    ));
+}
+
+#[cfg(test)]
+async fn dispatch_drop_session(
+    req: DropSessionRequest,
+    conn: &conn::ClientLink,
+    tab_to_session: &Arc<tokio::sync::Mutex<HashMap<String, acp::schema::v1::SessionId>>>,
+    template_memo: &TemplateMemo,
+    client_state: &ClientState,
+) {
+    let tab_aliases = Arc::new(Mutex::new(HashMap::new()));
+    let tab_binding_generations = Arc::new(Mutex::new(HashMap::new()));
+    drop(
+        dispatch_drop_session_with_aliases(
+            req,
+            conn,
+            tab_to_session,
+            &tab_aliases,
+            &tab_binding_generations,
+            template_memo,
+            client_state,
+        )
+        .await,
+    );
+}
+
+#[cfg(test)]
+async fn dispatch_rename_session(
+    req: RenameSessionRequest,
+    tab_to_session: &Arc<tokio::sync::Mutex<HashMap<String, acp::schema::v1::SessionId>>>,
+    in_flight_tabs: &SharedInFlightPrompts,
+) {
+    let tab_aliases = Arc::new(Mutex::new(HashMap::new()));
+    let tab_binding_generations = Arc::new(Mutex::new(HashMap::new()));
+    dispatch_rename_session_with_aliases(
+        req,
+        tab_to_session,
+        in_flight_tabs,
+        &tab_aliases,
+        &tab_binding_generations,
+    )
+    .await;
+}
+
+/// Assemble the ACP prompt content: the (already-templated) text block,
+/// followed by one `ContentBlock::Image` per pasted (Alt+V) image. Extracted
+/// so the text→Image ordering and base64/mime mapping are unit-testable
+/// without standing up a full ACP session.
+fn build_prompt_content(
+    text: &str,
+    images: &[crate::clipboard_image::PastedImage],
+) -> Vec<acp::schema::v1::ContentBlock> {
+    let mut content: Vec<acp::schema::v1::ContentBlock> = vec![text.to_string().into()];
+    for image in images {
+        content.push(acp::schema::v1::ContentBlock::Image(
+            acp::schema::v1::ImageContent::new(image.data_base64.clone(), image.mime_type.clone()),
+        ));
+    }
+    content
+}
+
+async fn stop_prompt_tasks(
+    prompt_tasks: &mut Vec<PromptTask>,
+    in_flight_tabs: &SharedInFlightPrompts,
+) {
+    const PROMPT_TASK_SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_millis(100);
+
+    for task in prompt_tasks.iter() {
+        task.cancellation.cancel();
+    }
+    let deadline = tokio::time::Instant::now() + PROMPT_TASK_SHUTDOWN_GRACE;
+    for mut task in prompt_tasks.drain(..) {
+        if tokio::time::timeout_at(deadline, &mut task.handle)
+            .await
+            .is_err()
+        {
+            task.handle.abort();
+            let _ = task.handle.await;
+        }
+    }
+    in_flight_tabs.lock().unwrap().clear();
+}
+
+async fn stop_lifecycle_tasks(lifecycle_tasks: &mut Vec<LifecycleTask>) {
+    for task in lifecycle_tasks.iter() {
+        task.abort();
+    }
+    for task in lifecycle_tasks.drain(..) {
+        let _ = task.await;
+    }
+}
+
+fn retire_queued_prompt_submissions(prompt_rx: &mut mpsc::UnboundedReceiver<PromptSubmission>) {
+    prompt_rx.close();
+    while let Ok(prompt) = prompt_rx.try_recv() {
+        prompt.cancellation.cancel();
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn close_client_receivers(
+    prompt_rx: &mut mpsc::UnboundedReceiver<PromptSubmission>,
+    new_session_rx: &mut mpsc::UnboundedReceiver<NewSessionForTab>,
+    load_session_rx: &mut mpsc::UnboundedReceiver<LoadSessionForTab>,
+    drop_session_rx: &mut mpsc::UnboundedReceiver<DropSessionRequest>,
+    rename_session_rx: &mut mpsc::UnboundedReceiver<RenameSessionRequest>,
+    restart_rx: &mut mpsc::UnboundedReceiver<AgentLifecycleRequest>,
+    session_hook_rx: &mut mpsc::UnboundedReceiver<crate::agent_sessions::SessionEvent>,
+    master_ext_rx: &mut mpsc::UnboundedReceiver<MasterExtRequest>,
+) {
+    retire_queued_prompt_submissions(prompt_rx);
+    new_session_rx.close();
+    load_session_rx.close();
+    drop_session_rx.close();
+    rename_session_rx.close();
+    restart_rx.close();
+    session_hook_rx.close();
+    master_ext_rx.close();
+}
+
+async fn finalize_client_transport(
+    transport_guard: &mut ClientTransportGuard,
+    report_master_disconnect: bool,
+    prompt_tasks: &mut Vec<PromptTask>,
+    in_flight_tabs: &SharedInFlightPrompts,
+    lifecycle_tasks: &mut Vec<LifecycleTask>,
+) {
+    transport_guard.conn.shutdown();
+    stop_lifecycle_tasks(lifecycle_tasks).await;
+    stop_prompt_tasks(prompt_tasks, in_flight_tabs).await;
+    transport_guard.reap_io_task().await;
+    transport_guard.publish_retired(report_master_disconnect);
+}
+
+#[cfg(test)]
+async fn complete_transport_shutdown(
+    io_result: std::result::Result<(), tokio::task::JoinError>,
+    suppress_transport_error: &AtomicBool,
+    event_tx: &mpsc::UnboundedSender<AppEvent>,
+    prompt_tasks: &mut Vec<PromptTask>,
+    in_flight_tabs: &SharedInFlightPrompts,
+) -> AcpClientExit {
+    let (exit, report_master_disconnect) =
+        complete_transport_io_task(io_result, suppress_transport_error);
+    stop_prompt_tasks(prompt_tasks, in_flight_tabs).await;
+    if report_master_disconnect {
+        let _ = event_tx.send(AppEvent::MasterDisconnected);
+    }
+    exit
+}
+
+fn publish_prompt_cancellation_settled(
+    cleanup: &mut PromptDispatchCleanup,
+    event_tx: &mpsc::UnboundedSender<AppEvent>,
+    prompt_id: u64,
+    started: bool,
+) {
+    cleanup.release();
+    let _ = event_tx.send(AppEvent::PromptCancellationSettled { prompt_id, started });
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn dispatch_prompt(
+    prompt: PromptSubmission,
+    conn: &conn::ClientLink,
+    tab_to_session: &Arc<tokio::sync::Mutex<HashMap<String, acp::schema::v1::SessionId>>>,
+    template_memo: &TemplateMemo,
+    in_flight_tabs: &SharedInFlightPrompts,
+    event_tx: &mpsc::UnboundedSender<AppEvent>,
+    shell_mgr: &Arc<ShellManager>,
+    prompt_timing: &Arc<PromptTimingState>,
+    client: &WtaClient,
+    prompt_usage_identity: &PromptUsageIdentity,
+    wt_connected: bool,
+    is_agent_pane: bool,
+    proposal_commands_supported: bool,
+    proposal_channels: &Arc<crate::agent_tools::action_proposal::channel::ProposalChannelManager>,
+) -> Option<PromptTask> {
+    let tab_aliases = Arc::new(Mutex::new(HashMap::new()));
+    let tab_binding_generations = Arc::new(Mutex::new(HashMap::new()));
+    dispatch_prompt_with_aliases(
+        prompt,
+        conn,
+        tab_to_session,
+        template_memo,
+        in_flight_tabs,
+        &tab_aliases,
+        &tab_binding_generations,
+        event_tx,
+        shell_mgr,
+        prompt_timing,
+        client,
+        prompt_usage_identity,
+        wt_connected,
+        is_agent_pane,
+        proposal_commands_supported,
+        proposal_channels,
+    )
+}
+
+fn dispatch_prompt_with_aliases(
+    prompt: PromptSubmission,
+    conn: &conn::ClientLink,
+    tab_to_session: &Arc<tokio::sync::Mutex<HashMap<String, acp::schema::v1::SessionId>>>,
+    template_memo: &TemplateMemo,
+    in_flight_tabs: &SharedInFlightPrompts,
+    tab_aliases: &SharedTabAliases,
+    tab_binding_generations: &SharedTabBindingGenerations,
+    event_tx: &mpsc::UnboundedSender<AppEvent>,
+    shell_mgr: &Arc<ShellManager>,
+    prompt_timing: &Arc<PromptTimingState>,
+    client: &WtaClient,
+    prompt_usage_identity: &PromptUsageIdentity,
+    wt_connected: bool,
+    is_agent_pane: bool,
+    proposal_commands_supported: bool,
+    proposal_channels: &Arc<crate::agent_tools::action_proposal::channel::ProposalChannelManager>,
+) -> Option<PromptTask> {
+    let submitted_tab_key = prompt
+        .pane_context
+        .as_ref()
+        .and_then(|c| c.tab_id.clone())
+        .unwrap_or_else(|| "0".to_string());
+    let tab_key = resolve_tab_alias(tab_aliases, &submitted_tab_key);
+    let prompt_id = prompt.id;
+
+    if prompt.cancellation.is_cancelled() {
+        return Some(PromptTask {
+            cancellation: prompt.cancellation.clone(),
+            handle: tokio::task::spawn_local({
+                let event_tx = event_tx.clone();
+                async move {
+                    let _ = event_tx.send(AppEvent::PromptCancellationSettled {
+                        prompt_id,
+                        started: false,
+                    });
+                }
+            }),
+        });
+    }
+
+    {
+        let mut g = in_flight_tabs.lock().unwrap();
+        match g.entry(tab_key.clone()) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(prompt_id);
+            }
+            std::collections::hash_map::Entry::Occupied(_) => {
+                let _ = event_tx.send(AppEvent::AgentBusy {
+                    tab_id: tab_key.clone(),
+                });
+                return None;
+            }
+        }
+    }
+
+    let conn_task = conn.clone();
+    let tab_to_session_task = Arc::clone(tab_to_session);
+    let template_memo_task = template_memo.clone();
+    let in_flight_tabs_task = Arc::clone(in_flight_tabs);
+    let tab_aliases_task = Arc::clone(tab_aliases);
+    let tab_binding_generations_task = Arc::clone(tab_binding_generations);
+    let event_tx_task = event_tx.clone();
+    let shell_mgr_task = Arc::clone(shell_mgr);
+    let prompt_timing_task = Arc::clone(prompt_timing);
+    let client_task = client.clone();
+    let prompt_usage_identity_task = prompt_usage_identity.clone();
+    let proposal_channels_task = Arc::clone(proposal_channels);
+    let tab_key_task = tab_key.clone();
+    let cancellation = prompt.cancellation.clone();
+    let handle = tokio::task::spawn_local(dispatch_prompt_body(
+        prompt,
+        conn_task,
+        tab_to_session_task,
+        template_memo_task,
+        in_flight_tabs_task,
+        tab_aliases_task,
+        tab_binding_generations_task,
+        event_tx_task,
+        shell_mgr_task,
+        prompt_timing_task,
+        client_task,
+        prompt_usage_identity_task,
+        tab_key_task,
+        wt_connected,
+        is_agent_pane,
+        proposal_commands_supported,
+        proposal_channels_task,
+    ));
+    Some(PromptTask {
+        cancellation,
+        handle,
+    })
+}
+
+/// The per-prompt task body: lazily resolves the tab's ACP session,
+/// streams the prompt, listens for cancel, and cleans up. Spawned by
+/// [`dispatch_prompt`] and never called directly from the event loop.
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_prompt_body(
+    prompt: PromptSubmission,
+    conn_task: conn::ClientLink,
+    tab_to_session_task: Arc<tokio::sync::Mutex<HashMap<String, acp::schema::v1::SessionId>>>,
+    template_memo: TemplateMemo,
+    in_flight_tabs_task: SharedInFlightPrompts,
+    tab_aliases_task: SharedTabAliases,
+    tab_binding_generations_task: SharedTabBindingGenerations,
+    event_tx_task: mpsc::UnboundedSender<AppEvent>,
+    shell_mgr_task: Arc<ShellManager>,
+    prompt_timing_task: Arc<PromptTimingState>,
+    client_task: WtaClient,
+    prompt_usage_identity_task: PromptUsageIdentity,
+    tab_key_task: String,
+    wt_connected: bool,
+    is_agent_pane: bool,
+    proposal_commands_supported: bool,
+    proposal_channels: Arc<crate::agent_tools::action_proposal::channel::ProposalChannelManager>,
+) {
+    let prompt_id = prompt.id;
+    let cancellation = prompt.cancellation.clone();
+    let tab_key_task = resolve_tab_alias(&tab_aliases_task, &tab_key_task);
+    let mut cleanup = PromptDispatchCleanup {
+        tab_key: tab_key_task.clone(),
+        prompt_id: prompt.id,
+        in_flight_tabs: Arc::clone(&in_flight_tabs_task),
+        released: false,
+    };
+
+    if cancellation.is_cancelled() {
+        publish_prompt_cancellation_settled(&mut cleanup, &event_tx_task, prompt_id, false);
+        return;
+    }
+
+    // Resolve (or lazily create) the ACP session for this tab.
+    let existing_session = {
+        let g = tab_to_session_task.lock().await;
+        g.get(&tab_key_task).cloned()
+    };
+    let (prompt_session_id, lazy_yolo_operation) = {
+        if cancellation.is_cancelled() {
+            publish_prompt_cancellation_settled(&mut cleanup, &event_tx_task, prompt_id, false);
+            return;
+        }
+        if let Some(sid) = existing_session {
+            (sid, None)
+        } else {
+            let (binding_tab_id, binding_generation) = begin_tab_binding_operation(
+                &tab_aliases_task,
+                &tab_binding_generations_task,
+                &tab_key_task,
+            );
+            let cwd = prompt
+                .pane_context
+                .as_ref()
+                .and_then(|c| c.cwd.clone())
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+            let new_session_started = std::time::Instant::now();
+            let mut new_session_req = acp::schema::v1::NewSessionRequest::new(cwd);
+            inject_wta_pane_meta(&mut new_session_req.meta, proposal_commands_supported);
+            let new_session_result = conn_task.new_session(new_session_req).await;
+            log_acp_new_session_result(
+                "LazyCreateOnFirstPrompt",
+                new_session_started,
+                &new_session_result,
+            );
+            let mut new_session = match new_session_result {
+                Ok(s) => s,
+                Err(_) if cancellation.is_cancelled() => {
+                    publish_prompt_cancellation_settled(
+                        &mut cleanup,
+                        &event_tx_task,
+                        prompt_id,
+                        false,
+                    );
+                    return;
+                }
+                Err(e) => {
+                    let current_tab_id = resolve_tab_alias(&tab_aliases_task, &tab_key_task);
+                    let _ = event_tx_task.send(AppEvent::PromptError {
+                        tab_id: current_tab_id,
+                        prompt_id,
+                        message: format!("new_session failed for tab {}: {}", tab_key_task, e),
+                    });
+                    return;
+                }
+            };
+            if take_retired_session_result(&mut new_session.meta) {
+                tracing::info!(
+                    target: "acp_new_session",
+                    tab = %tab_key_task,
+                    session_id = %new_session.session_id,
+                    "abandoning prompt because its lazy session was retired during tab reset or close"
+                );
+                cancellation.cancelled().await;
+                publish_prompt_cancellation_settled(&mut cleanup, &event_tx_task, prompt_id, false);
+                return;
+            }
+            let Some(current_tab_key) = current_tab_binding_operation(
+                &tab_aliases_task,
+                &tab_binding_generations_task,
+                &binding_tab_id,
+                binding_generation,
+            ) else {
+                cancellation.cancelled().await;
+                publish_prompt_cancellation_settled(&mut cleanup, &event_tx_task, prompt_id, false);
+                return;
+            };
+            let new_sid = new_session.session_id.clone();
+            if is_agent_pane {
+                let pane_session_id = std::env::var("WT_SESSION").unwrap_or_default();
+                let pane_for_index = if pane_session_id.is_empty() {
+                    None
+                } else {
+                    Some(pane_session_id.as_str())
+                };
+                tracing::info!(
+                    target: "agent_pane_origin",
+                    session_id = %new_sid,
+                    pane_session_id = %pane_session_id,
+                    "recording agent-pane session origin (lazy_create_on_first_prompt)",
+                );
+                record_agent_pane_origin(&client_task.state, new_sid.0.as_ref(), pane_for_index);
+            }
+            let (available_models, current_model_id) =
+                crate::protocol::acp::model_select::models_from_new_session(&new_session);
+            record_native_yolo(&new_session, &client_task.state);
+            let enabled = {
+                let mut state = client_task.state.yolo_state.lock().unwrap();
+                state.remove_session(new_sid.0.as_ref());
+                let enabled = state
+                    .automatic_directive(new_sid.0.as_ref())
+                    .target()
+                    .expect("a freshly-created session must have an automatic target");
+                state.mark_client_reconciled(new_sid.to_string(), enabled);
+                enabled
+            };
+            let yolo_operation = client_task
+                .state
+                .native_yolo
+                .reserve_operation(new_sid.clone(), enabled);
+            tab_to_session_task
+                .lock()
+                .await
+                .insert(current_tab_key.clone(), new_sid.clone());
+            let _ = event_tx_task.send(AppEvent::SessionAttached {
+                tab_id: current_tab_key.clone(),
+                session_id: new_sid.to_string(),
+                prompt_id: Some(prompt_id),
+                available_models,
+                current_model_id,
+            });
+            publish_session_config_options(
+                &event_tx_task,
+                &client_task.state.native_yolo,
+                &new_sid,
+                new_session.config_options.as_deref(),
+            );
+            (new_sid, Some((enabled, yolo_operation)))
+        }
+    };
+    let prompt_session_id_str = prompt_session_id.to_string();
+
+    if let Some((enabled, operation)) = lazy_yolo_operation {
+        let yolo_result = apply_native_yolo_checked(
+            &conn_task,
+            &client_task.state,
+            operation.clone(),
+            super::native_yolo::NATIVE_YOLO_RPC_TIMEOUT,
+        )
+        .await;
+        if cancellation.is_cancelled() {
+            publish_prompt_cancellation_settled(&mut cleanup, &event_tx_task, prompt_id, false);
+            return;
+        }
+        match yolo_result {
+            Err(error) => {
+                // As with config/reconcile, an ordinary ACP rejection
+                // cannot attest that a requested disable left privileged mode.
+                let restart_required = !enabled || error.restart_required();
+                let policy_blocked = !client_task
+                    .state
+                    .yolo_state
+                    .lock()
+                    .unwrap()
+                    .can_user_request_enable();
+                let error = error.to_string();
+                tracing::warn!(
+                    target: "yolo",
+                    session_id = %prompt_session_id_str,
+                    enabled,
+                    restart_required,
+                    policy_blocked,
+                    error = %error,
+                    "provider-native Yolo state could not be established before first prompt"
+                );
+                if !enabled || policy_blocked || restart_required {
+                    publish_retryable_lazy_yolo_error(&event_tx_task, &prompt_session_id_str);
+                    let _ = event_tx_task.send(AppEvent::RuntimeYoloReconcileCompleted {
+                        reconcile_id: 0,
+                        fail_closed: !enabled,
+                        restart_required,
+                        result: Err(error),
+                    });
+                    return;
+                }
+            }
+            Ok(config_options) => {
+                if !publish_current_native_config_options(
+                    &event_tx_task,
+                    &client_task.state.native_yolo,
+                    &prompt_session_id,
+                    &operation,
+                    config_options.as_deref(),
+                ) {
+                    tracing::info!(
+                        target: "yolo",
+                        session_id = %prompt_session_id_str,
+                        "ending first prompt with a retryable error because its lazy-session Yolo operation was superseded"
+                    );
+                    publish_retryable_lazy_yolo_error(&event_tx_task, &prompt_session_id_str);
+                    return;
+                }
+            }
+        }
+    }
+
+    if cancellation.is_cancelled() {
+        publish_prompt_cancellation_settled(&mut cleanup, &event_tx_task, prompt_id, false);
+        return;
+    }
+
+    let policy_blocked = !client_task
+        .state
+        .yolo_state
+        .lock()
+        .unwrap()
+        .can_user_request_enable();
+    if client_task
+        .state
+        .native_yolo
+        .prompt_must_wait_for_disable(&prompt_session_id, policy_blocked)
+    {
+        let message = provider_disable_pending();
+        tracing::error!(
+            target: "yolo",
+            session_id = %prompt_session_id_str,
+            "blocking prompt until the provider acknowledges disabled permissions"
+        );
+        let _ = event_tx_task.send(AppEvent::AgentError {
+            session_id: Some(prompt_session_id_str),
+            failure: AgentFailure::Protocol {
+                code: -32003,
+                message: message.clone(),
+            },
+            message,
+        });
+        return;
+    }
+
+    if !client_task
+        .state
+        .yolo_state
+        .lock()
+        .unwrap()
+        .can_user_request_enable()
+    {
+        if let Some(command_name) = client_task
+            .state
+            .native_yolo
+            .privileged_agent_command(&prompt.text)
+        {
+            tracing::warn!(
+                target: "yolo",
+                session_id = %prompt_session_id_str,
+                "AllowAutomaticApproval blocked provider command /{}",
+                command_name
+            );
+            let message = provider_command_blocked_by_policy(command_name);
+            let _ = event_tx_task.send(AppEvent::AgentError {
+                session_id: Some(prompt_session_id_str.clone()),
+                failure: AgentFailure::Protocol {
+                    code: -32003,
+                    message: message.clone(),
+                },
+                message,
+            });
+            return;
+        }
+    }
+
+    let kind = if prompt.is_autofix() {
+        TemplateKind::Autofix
+    } else {
+        TemplateKind::Planner
+    };
+    let include_base_prompt = if prompt.is_agent_command() {
+        false
+    } else {
+        template_memo.should_ship_base(&prompt_session_id_str).await
+    };
+
+    prompt_timing_task.activate(
+        &prompt_session_id_str,
+        prompt.id,
+        &prompt.text,
+        prompt.submitted_at_unix_s,
+        prompt.is_byok(),
+        prompt.agent_id(),
+    );
+    let (text, prompt_source, resolved_target_pane) = if prompt.is_agent_command() {
+        (prompt.text.clone(), "agent_command".to_string(), None)
+    } else {
+        let (text, source, name, target) = build_prompt_text(
+            prompt.id,
+            prompt.submitted_at_unix_s,
+            &prompt.text,
+            prompt.autofix_text_kind,
+            include_base_prompt,
+            &shell_mgr_task,
+            wt_connected,
+            prompt.pane_context.as_ref(),
+            Some(&conn_task),
+        )
+        .await;
+        let _ = event_tx_task.send(AppEvent::PromptTemplateLoaded { name });
+        (text, source, target)
+    };
+    if cancellation.is_cancelled() {
+        let _ = prompt_timing_task.complete(&prompt_session_id_str, false, Some("cancelled"));
+        publish_prompt_cancellation_settled(&mut cleanup, &event_tx_task, prompt_id, false);
+        return;
+    }
+    let explicit_source = prompt
+        .pane_context
+        .as_ref()
+        .is_some_and(|c| c.source_pane_id.is_some());
+    // Autofix already binds an explicit source in App before dispatch.
+    if resolved_target_pane.is_none()
+        && !prompt.is_agent_command()
+        && wt_connected
+        && !(prompt.is_autofix() && explicit_source)
+    {
+        tracing::warn!(
+            target: "acp.terminal_context",
+            helper_pid = std::process::id(),
+            prompt_id = prompt.id,
+            explicit_source,
+            "prompt_has_no_bound_pane"
+        );
+    }
+    if proposal_commands_supported {
+        match proposal_channels.issue(
+            prompt_session_id_str.clone(),
+            prompt.id,
+            resolved_target_pane.clone(),
+            prompt.is_autofix(),
+        ) {
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(
+                    target: "proposal_channel",
+                    status = ?error.status,
+                    reason = error.reason,
+                    "failed to issue proposal channel for prompt"
+                );
+            }
+        }
+    }
+    // Bind the pane used to build this prompt to the matching turn. The host
+    // uses this authoritative value instead of a model-generated action target.
+    if let Some(pane_id) = resolved_target_pane {
+        let _ = event_tx_task.send(AppEvent::PromptTargetResolved {
+            tab_id: prompt
+                .pane_context
+                .as_ref()
+                .and_then(|c| c.tab_id.as_deref())
+                .map(|tab_id| resolve_tab_alias(&tab_aliases_task, tab_id)),
+            prompt_id: prompt.id,
+            pane_id,
+        });
+    }
+    prompt_timing_task.mark_context_ready(&prompt_session_id_str, text.len());
+    acp_log_built_prompt(
+        &prompt.text,
+        prompt.pane_context.as_ref(),
+        &prompt_source,
+        &text,
+    );
+    if !prompt.is_agent_command() {
+        log_turn_trace(
+            prompt.id,
+            &prompt_session_id_str,
+            kind,
+            include_base_prompt,
+            &text,
+        );
+    }
+    // Build the prompt content: the (templated) text block, followed by any
+    // images pasted via Alt+V as ACP `ContentBlock::Image` blocks. Images ride
+    // through master → agent CLI verbatim; the agent only receives them if it
+    // advertised `promptCapabilities.image` (the UI gates Alt+V on that flag).
+    let content = build_prompt_content(&text, &prompt.images);
+    let privileged_agent_command = client_task
+        .state
+        .native_yolo
+        .privileged_agent_command(&prompt.text)
+        .map(str::to_string);
+    let prompt_yolo_generation = client_task
+        .state
+        .native_yolo
+        .session_generation(&prompt_session_id);
+    let yolo_state = Arc::clone(&client_task.state.yolo_state);
+    let native_yolo = Arc::clone(&client_task.state.native_yolo);
+    let final_yolo_safety_error = Arc::new(Mutex::new(None::<(String, &'static str)>));
+    let telemetry_timing = Arc::clone(&prompt_timing_task);
+    let telemetry_session_id = prompt_session_id_str.clone();
+    let telemetry_prompt_len = u32::try_from(text.len()).unwrap_or(u32::MAX);
+    let telemetry_is_autofix = prompt.is_autofix();
+    let telemetry_source = match kind {
+        TemplateKind::Autofix => "Autofix",
+        TemplateKind::Planner if prompt.is_agent_command() => "AgentCommand",
+        TemplateKind::Planner => "Planner",
+    };
+    let telemetry_is_byok = prompt.is_byok();
+    let telemetry_agent_id = prompt.agent_id().to_string();
+    let telemetry_reattached = prompt.was_reattached_at_dispatch(&telemetry_session_id);
+    let telemetry_prompt_id = prompt.id;
+    let telemetry_is_agent_command = prompt.is_agent_command();
+    let prompt_started = Arc::new(AtomicBool::new(false));
+    let cancelled_at_send = Arc::new(AtomicBool::new(false));
+    let yolo_state_for_guard = Arc::clone(&yolo_state);
+    let prompt_fut = conn_task.prompt_if(
+        acp::schema::v1::PromptRequest::new(prompt_session_id.clone(), content),
+        {
+            let privileged_agent_command = privileged_agent_command.clone();
+            let final_yolo_safety_error = Arc::clone(&final_yolo_safety_error);
+            let guard_session_id = prompt_session_id.clone();
+            let cancellation = cancellation.clone();
+            let prompt_started = Arc::clone(&prompt_started);
+            let cancelled_at_send = Arc::clone(&cancelled_at_send);
+            move || {
+                if cancellation.is_cancelled() {
+                    cancelled_at_send.store(true, Ordering::Release);
+                    return false;
+                }
+                let can_user_request_enable = yolo_state_for_guard
+                    .lock()
+                    .unwrap()
+                    .can_user_request_enable();
+                let policy_blocked = !can_user_request_enable;
+                let provider_command_blocked =
+                    privileged_agent_command.is_some() && !can_user_request_enable;
+                let yolo_safety_error = if provider_command_blocked {
+                    None
+                } else if native_yolo
+                    .prompt_must_wait_for_disable(&guard_session_id, policy_blocked)
+                {
+                    Some((provider_disable_pending(), "yolo_disable_pending"))
+                } else {
+                    None
+                };
+                let should_send = !provider_command_blocked && yolo_safety_error.is_none();
+                if let Some(error) = yolo_safety_error {
+                    *final_yolo_safety_error.lock().unwrap() = Some(error);
+                }
+                if should_send {
+                    prompt_started.store(true, Ordering::Release);
+                    if telemetry_is_agent_command {
+                        tracing::info!(
+                            target: "acp",
+                            prompt_id = telemetry_prompt_id,
+                            session_id = %telemetry_session_id,
+                            prompt_len = telemetry_prompt_len,
+                            "sending Agent command verbatim"
+                        );
+                    }
+                    telemetry_timing.mark_prompt_sent(&telemetry_session_id);
+                    let user_prompt_ordinal = telemetry_timing
+                        .record_user_prompt_dispatch(&telemetry_session_id, telemetry_is_autofix);
+                    crate::telemetry::log_agent_prompt_sent(
+                        telemetry_prompt_len,
+                        telemetry_is_autofix,
+                        telemetry_source,
+                        telemetry_is_byok,
+                        &telemetry_agent_id,
+                        telemetry_reattached,
+                        user_prompt_ordinal,
+                    );
+                }
+                should_send
+            }
+        },
+    );
+    tokio::pin!(prompt_fut);
+
+    let completed_successfully = tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => {
+            // Cancellation is a request, not the terminal boundary. If the
+            // prompt has already been sent, notify that exact resolved ACP
+            // session and keep its future alive until the producer resolves.
+            let started = prompt_started.load(Ordering::Acquire);
+            tracing::info!(target: "acp_cancel", session_id = %prompt_session_id_str, "waiting for cancelled prompt to quiesce");
+            let _ = prompt_timing_task.complete(
+                &prompt_session_id_str,
+                false,
+                Some("cancelled"),
+            );
+            if started {
+                if let Err(e) = conn_task
+                    .cancel(acp::schema::v1::CancelNotification::new(prompt_session_id.clone()))
+                    .await
+                {
+                    tracing::warn!(target: "acp_cancel", session_id = %prompt_session_id_str, error = ?e, "session/cancel rpc failed (likely unsupported)");
+                }
+                // ACP updates identify only the session, not the prompt. Do
+                // not synthesize completion on a timeout unless master can
+                // atomically retire this exact session; otherwise late output
+                // can be attached to the next turn on the same session.
+                let _ = (&mut prompt_fut).await;
+                // Some providers flush trailing chunks just after returning
+                // PromptResponse, so a scheduler yield is not a sufficient
+                // compatibility drain here.
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            publish_prompt_cancellation_settled(
+                &mut cleanup,
+                &event_tx_task,
+                prompt_id,
+                started,
+            );
+            false
+        }
+        result = &mut prompt_fut => {
+            match result {
+                Ok(None) if cancelled_at_send.load(Ordering::Acquire) => {
+                    let _ = prompt_timing_task.complete(
+                        &prompt_session_id_str,
+                        false,
+                        Some("cancelled"),
+                    );
+                    publish_prompt_cancellation_settled(
+                        &mut cleanup,
+                        &event_tx_task,
+                        prompt_id,
+                        false,
+                    );
+                    false
+                }
+                Ok(None) => {
+                    let yolo_safety_error = final_yolo_safety_error.lock().unwrap().take();
+                    let (message, completion_reason) =
+                        if let Some(error) = yolo_safety_error {
+                            tracing::error!(
+                                target: "yolo",
+                                session_id = %prompt_session_id_str,
+                                "blocking prompt at send boundary because Yolo safety is not established"
+                            );
+                            error
+                        } else {
+                            let command_name = privileged_agent_command
+                                .as_deref()
+                                .unwrap_or("privileged command");
+                            tracing::warn!(
+                                target: "yolo",
+                                session_id = %prompt_session_id_str,
+                                "AllowAutomaticApproval blocked provider command /{}",
+                                command_name
+                            );
+                            (
+                                provider_command_blocked_by_policy(command_name),
+                                "policy_blocked",
+                            )
+                        };
+                    let _ = prompt_timing_task.complete(
+                        &prompt_session_id_str,
+                        false,
+                        Some(completion_reason),
+                    );
+                    let _ = event_tx_task.send(AppEvent::AgentError {
+                        session_id: Some(prompt_session_id_str.clone()),
+                        failure: AgentFailure::Protocol {
+                            code: -32003,
+                            message: message.clone(),
+                        },
+                        message,
+                    });
+                    false
+                }
+                result => {
+                    let result = result.map(|response| {
+                        response.expect("prompt guard returns None only when policy blocks")
+                    });
+                    let accepted_privileged_command = privileged_agent_command.is_some()
+                        && result.as_ref().is_ok_and(|response| {
+                            response.stop_reason == acp::schema::v1::StopReason::EndTurn
+                        });
+                    if accepted_privileged_command {
+                        let session_is_current = {
+                            let sessions = tab_to_session_task.lock().await;
+                            let current_tab =
+                                resolve_tab_alias(&tab_aliases_task, &tab_key_task);
+                            sessions.get(&current_tab) == Some(&prompt_session_id)
+                        } && client_task
+                            .state
+                            .native_yolo
+                            .session_generation(&prompt_session_id)
+                            == prompt_yolo_generation;
+                        if session_is_current {
+                            let owner_changed = yolo_state
+                                .lock()
+                                .unwrap()
+                                .mark_manual_if_allowed(prompt_session_id_str.clone());
+                            if owner_changed {
+                                let _ =
+                                    event_tx_task.send(AppEvent::YoloControlOwnerChanged {
+                                        session_id: prompt_session_id_str.clone(),
+                                    });
+                            }
+                        }
+                    }
+                    // Peek the successful turn's stop_reason (the response is consumed
+                    // by `complete_prompt_request`). A soft stop is not an error; the
+                    // Err arm is classified separately by `from_acp_error`.
+                    let soft_stop = result
+                        .as_ref()
+                        .ok()
+                        .and_then(|resp| SoftStopReason::from_stop_reason(resp.stop_reason));
+                    let successful = result.is_ok();
+                    cleanup.release();
+                    complete_prompt_request(
+                        result,
+                        soft_stop,
+                        &prompt_timing_task,
+                        &event_tx_task,
+                        prompt_session_id_str.clone(),
+                    )
+                    .await;
+                    successful
+                }
+            }
+        }
+    };
+    drop(prompt_fut);
+
+    if completed_successfully {
+        match probe_private_usage(
+            &conn_task,
+            &client_task,
+            &prompt_usage_identity_task,
+            prompt_session_id.clone(),
+        )
+        .await
+        {
+            Ok(Some(snapshot)) => {
+                let _ = event_tx_task.send(AppEvent::UsageReported {
+                    session_id: prompt_session_id_str.clone(),
+                    snapshot,
+                });
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(
+                    target: "usage",
+                    session_id = %prompt_session_id_str,
+                    error = %error,
+                    "optional provider usage probe failed"
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) use tests::assert_session_mcp_permission_contract;
+
+#[cfg(test)]
+mod tests {
+    use super::acp;
+    use super::{
+        acp_error_detail, acp_result_failure_fields, bounded_tool_output_parts,
+        claim_unexpected_transport_loss, complete_prompt_request, complete_transport_shutdown,
+        inject_wta_pane_meta, is_redundant_startup_model_error, post_login_authenticate_error,
+        provider_disable_pending, retire_queued_prompt_submissions, stop_prompt_tasks,
+        timeout_result_failure_fields, tool_call_exit_code, tool_call_kind_label,
+        tool_call_location_hint, tool_call_target, AcpClientExit, ClientState,
+        PromptDispatchCleanup, PromptSubmission, PromptTask, PromptTimingState,
+        PromptUsageIdentity, SessionMcpTool, SoftStopReason, WtaClient,
+    };
+    use crate::agent_tools::session_mcp::stamp_server_identity;
+    use crate::app_contracts::AppEvent;
+    use crate::protocol::acp::failure::{AgentFailure, HandshakeStage};
+    use crate::shell::ShellManager;
+    use std::collections::{HashMap, HashSet};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+    use tokio::sync::mpsc;
+    use tokio_util::sync::CancellationToken;
+
+    #[test]
+    fn provider_disable_pending_localizes_reason() {
+        const ENGLISH_PENDING: &str =
+            "the provider has not acknowledged the required nonprivileged session state";
+        let _locale = crate::test_support::lock_locale();
+        rust_i18n::set_locale("de-DE");
+
+        let localized_error = t!("system.yolo_disable_pending");
+        let message = provider_disable_pending();
+
+        assert_ne!(localized_error.as_ref(), ENGLISH_PENDING);
+        assert!(message.ends_with(localized_error.as_ref()));
+        assert!(
+            !message.contains(ENGLISH_PENDING),
+            "pending reason must be localized: {message}"
+        );
+    }
+
+    #[test]
+    fn prompt_dispatch_cleanup_finds_rekeyed_identity() {
+        let in_flight_tabs = Arc::new(Mutex::new(HashMap::from([("new-tab".to_string(), 7)])));
+
+        drop(PromptDispatchCleanup {
+            tab_key: "old-tab".to_string(),
+            prompt_id: 7,
+            in_flight_tabs: Arc::clone(&in_flight_tabs),
+            released: false,
+        });
+
+        assert!(in_flight_tabs.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn prompt_dispatch_cleanup_does_not_remove_newer_rekeyed_identity() {
+        let in_flight_tabs = Arc::new(Mutex::new(HashMap::from([
+            ("old-tab".to_string(), 8),
+            ("new-tab".to_string(), 7),
+        ])));
+        drop(PromptDispatchCleanup {
+            tab_key: "old-tab".to_string(),
+            prompt_id: 7,
+            in_flight_tabs: Arc::clone(&in_flight_tabs),
+            released: false,
+        });
+
+        assert_eq!(
+            in_flight_tabs.lock().unwrap().get("old-tab").copied(),
+            Some(8)
+        );
+        assert!(!in_flight_tabs.lock().unwrap().contains_key("new-tab"));
+    }
+
+    #[test]
+    fn fetch_target_strips_credentials_query_and_fragment() {
+        let raw_input = serde_json::json!({
+            "url": "https://user:secret@example.com/api/items?token=secret#result"
+        });
+
+        assert_eq!(
+            tool_call_target(
+                Some(&acp::schema::v1::ToolKind::Fetch),
+                &[],
+                Some(&raw_input)
+            ),
+            Some(("https://example.com/api/items".to_string(), false))
+        );
+        assert_eq!(
+            tool_call_target(None, &[], Some(&raw_input)),
+            Some(("https://example.com/api/items".to_string(), false))
+        );
+        assert_eq!(
+            tool_call_location_hint(
+                "Fetching https://user:secret@example.com/api/items?token=secret#result",
+                Some(&acp::schema::v1::ToolKind::Fetch),
+                &[],
+                Some(&raw_input),
+            ),
+            Some(("https://example.com/api/items".to_string(), false))
+        );
+    }
+
+    #[test]
+    fn unexpected_transport_loss_is_claimed_exactly_once() {
+        let claimed = std::sync::atomic::AtomicBool::new(false);
+
+        assert!(claim_unexpected_transport_loss(true, &claimed));
+        assert!(!claim_unexpected_transport_loss(true, &claimed));
+    }
+
+    #[test]
+    fn direct_setup_failure_suppresses_guard_induced_transport_loss() {
+        let claimed = std::sync::atomic::AtomicBool::new(false);
+
+        assert!(!claim_unexpected_transport_loss(false, &claimed));
+        assert!(!claim_unexpected_transport_loss(true, &claimed));
+    }
+
+    #[tokio::test]
+    async fn transport_completion_aborts_prompt_task_that_ignores_cancel() {
+        struct DropFlag(Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for DropFlag {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::Release);
+            }
+        }
+
+        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let dropped_for_task = Arc::clone(&dropped);
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let cancellation = CancellationToken::new();
+        let handle = tokio::spawn(async move {
+            let _flag = DropFlag(dropped_for_task);
+            let _ = started_tx.send(());
+            std::future::pending::<()>().await;
+        });
+        let mut prompt_tasks = vec![PromptTask {
+            cancellation,
+            handle,
+        }];
+        started_rx.await.expect("prompt task started");
+
+        let in_flight_tabs = Arc::new(Mutex::new(HashMap::from([("tab-1".to_string(), 1)])));
+        let intentional_shutdown = std::sync::atomic::AtomicBool::new(false);
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let mut io_task = tokio::spawn(async {});
+
+        let io_result = tokio::select! {
+            result = &mut io_task => result,
+            _ = std::future::pending::<()>() => unreachable!("perpetual refetch cannot win"),
+        };
+        let exit = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            complete_transport_shutdown(
+                io_result,
+                &intentional_shutdown,
+                &event_tx,
+                &mut prompt_tasks,
+                &in_flight_tabs,
+            ),
+        )
+        .await
+        .expect("transport shutdown must not wait for provider cooperation");
+
+        assert_eq!(exit, AcpClientExit::ChannelsClosed);
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(AppEvent::MasterDisconnected)
+        ));
+        assert!(event_rx.try_recv().is_err(), "disconnect must be sent once");
+        assert!(prompt_tasks.is_empty());
+        assert!(in_flight_tabs.lock().unwrap().is_empty());
+        assert!(dropped.load(std::sync::atomic::Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn intentional_transport_completion_exits_without_disconnect_notification() {
+        let intentional_shutdown = std::sync::atomic::AtomicBool::new(true);
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let mut prompt_tasks = Vec::new();
+        let in_flight_tabs = Arc::new(Mutex::new(HashMap::new()));
+        let io_result = tokio::spawn(async {}).await;
+
+        let exit = complete_transport_shutdown(
+            io_result,
+            &intentional_shutdown,
+            &event_tx,
+            &mut prompt_tasks,
+            &in_flight_tabs,
+        )
+        .await;
+
+        assert_eq!(exit, AcpClientExit::ChannelsClosed);
+        assert!(event_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn rebind_or_shutdown_reaps_preparation_task_that_ignores_cancel() {
+        struct DropFlag(Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for DropFlag {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::Release);
+            }
+        }
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        tokio::task::LocalSet::new().block_on(&runtime, async {
+            let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let dropped_for_task = Arc::clone(&dropped);
+            let cancellation = CancellationToken::new();
+            let handle = tokio::task::spawn_local(async move {
+                let _flag = DropFlag(dropped_for_task);
+                std::future::pending::<()>().await;
+            });
+            let mut tasks = vec![PromptTask {
+                cancellation,
+                handle,
+            }];
+            tokio::task::yield_now().await;
+
+            let in_flight_tabs = Arc::new(Mutex::new(HashMap::from([("tab-1".to_string(), 1)])));
+
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                stop_prompt_tasks(&mut tasks, &in_flight_tabs),
+            )
+            .await
+            .expect("rebind/shutdown must abort non-cooperative prompt preparation");
+
+            assert!(tasks.is_empty());
+            assert!(in_flight_tabs.lock().unwrap().is_empty());
+            assert!(dropped.load(std::sync::atomic::Ordering::Acquire));
+        });
+    }
+
+    #[test]
+    fn transport_retirement_cancels_and_drains_queued_prompts() {
+        let (prompt_tx, mut prompt_rx) = mpsc::unbounded_channel();
+        let first = PromptSubmission::new("first".into(), None);
+        let second = PromptSubmission::new("second".into(), None);
+        let first_token = first.cancellation_token();
+        let second_token = second.cancellation_token();
+        prompt_tx.send(first).unwrap();
+        prompt_tx.send(second).unwrap();
+
+        retire_queued_prompt_submissions(&mut prompt_rx);
+
+        assert!(first_token.is_cancelled());
+        assert!(second_token.is_cancelled());
+        assert!(prompt_rx.try_recv().is_err());
+        assert!(prompt_tx
+            .send(PromptSubmission::new("late".into(), None))
+            .is_err());
+    }
+
+    #[test]
+    fn acp_error_detail_prefers_actionable_data() {
+        let error = acp::Error::internal_error()
+            .data("The saved API key was not found in Windows Credential Manager.");
+
+        assert_eq!(
+            acp_error_detail(&error),
+            "The saved API key was not found in Windows Credential Manager."
+        );
+    }
+
+    #[test]
+    fn bounded_tool_output_parts_keeps_unicode_tail_without_joining_full_input() {
+        let prefix = "界".repeat(4000);
+        let output = bounded_tool_output_parts([prefix.as_str(), "TAIL"].into_iter())
+            .expect("expected bounded output");
+
+        assert!(output.truncated);
+        assert_eq!(output.text.chars().count(), 4000);
+        assert!(output.text.ends_with("\nTAIL"));
+    }
+
+    #[test]
+    fn tool_call_exit_code_ignores_generic_code_fields() {
+        assert_eq!(
+            tool_call_exit_code(Some(&serde_json::json!({ "code": 200 }))),
+            None
+        );
+        assert_eq!(
+            tool_call_exit_code(Some(&serde_json::json!({ "exitCode": 7 }))),
+            Some(7)
+        );
+        assert_eq!(
+            tool_call_exit_code(Some(&serde_json::json!({ "exit_code": 9 }))),
+            Some(9)
+        );
+    }
+
+    fn proposal_permission_request(command: &str) -> acp::schema::v1::RequestPermissionRequest {
+        use acp::schema::v1::{
+            PermissionOption, PermissionOptionKind, RequestPermissionRequest, ToolCallId,
+            ToolCallUpdate, ToolCallUpdateFields, ToolKind,
+        };
+
+        RequestPermissionRequest::new(
+            acp::schema::v1::SessionId::new("proposal-session"),
+            ToolCallUpdate::new(
+                ToolCallId::new("proposal-tool"),
+                ToolCallUpdateFields::new()
+                    .kind(ToolKind::Execute)
+                    .raw_input(serde_json::json!({
+                        "command": command,
+                        "commands": [command],
+                    })),
+            ),
+            vec![PermissionOption::new(
+                "allow-once",
+                "Allow once",
+                PermissionOptionKind::AllowOnce,
+            )],
+        )
+    }
+
+    fn proposal_mcp_permission_request() -> acp::schema::v1::RequestPermissionRequest {
+        use acp::schema::v1::{
+            PermissionOption, PermissionOptionKind, RequestPermissionRequest, ToolCallId,
+            ToolCallUpdate, ToolCallUpdateFields,
+        };
+
+        let mut request = RequestPermissionRequest::new(
+            acp::schema::v1::SessionId::new("proposal-session"),
+            ToolCallUpdate::new(
+                ToolCallId::new("proposal-mcp-tool"),
+                ToolCallUpdateFields::new()
+                    .title("intellterm_0123456789abcdef/run_command_in_current_shell")
+                    .raw_input(serde_json::json!({
+                        "summary": "Run test",
+                        "command": "cargo test"
+                    })),
+            ),
+            vec![PermissionOption::new(
+                "allow-once",
+                "Allow once",
+                PermissionOptionKind::AllowOnce,
+            )],
+        );
+        stamp_server_identity(&mut request.meta, Some("intellterm_0123456789abcdef"));
+        request
+    }
+
+    fn session_mcp_notification(
+        session_id: &str,
+        update: acp::schema::v1::SessionUpdate,
+    ) -> acp::schema::v1::SessionNotification {
+        let mut notification = acp::schema::v1::SessionNotification::new(
+            acp::schema::v1::SessionId::new(session_id),
+            update,
+        );
+        stamp_server_identity(&mut notification.meta, Some("intellterm_0123456789abcdef"));
+        notification
+    }
+
+    fn proposal_test_client(
+        manager: Arc<crate::agent_tools::action_proposal::channel::ProposalChannelManager>,
+    ) -> (WtaClient, mpsc::UnboundedReceiver<AppEvent>) {
+        let (event_tx, event_rx) = mpsc::unbounded_channel();
+        let state = Arc::new(ClientState {
+            event_tx,
+            shell_mgr: Arc::new(ShellManager::new()),
+            prompt_timing: Arc::new(PromptTimingState::default()),
+            native_yolo: Arc::new(crate::protocol::acp::native_yolo::NativeYoloState::new()),
+            yolo_state: Arc::new(Mutex::new(crate::app_contracts::YoloState::new(
+                false, false,
+            ))),
+            provider_probe_capture: super::ProviderProbeCapture::default(),
+            standard_usage_sessions: Mutex::new(HashSet::new()),
+            proposal_channels: manager,
+            hidden_tool_calls: Mutex::new(HashMap::new()),
+            origin_scope: std::sync::OnceLock::new(),
+        });
+        (WtaClient { state }, event_rx)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn canonical_proposal_permission_requires_user_selection() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let manager = Arc::new(
+                    crate::agent_tools::action_proposal::channel::ProposalChannelManager::new(),
+                );
+                let payload = r#"{"schema_version":1,"origin":"terminal_agent","choices":[{"choice":1,"title":"run test","rationale":"","actions":[{"type":"send","input":"cargo test"}]}]}"#;
+                let channel = manager
+                    .issue("proposal-session".into(), 1, None, false)
+                    .unwrap();
+                let command =
+                    crate::agent_tools::action_proposal::invocation::render(&channel, payload)
+                        .unwrap();
+                let (client, mut event_rx) = proposal_test_client(Arc::clone(&manager));
+                let handle = tokio::task::spawn_local(async move {
+                    client
+                        .request_permission(proposal_permission_request(&command))
+                        .await
+                });
+
+                assert!(matches!(
+                    event_rx.recv().await,
+                    Some(AppEvent::HideToolCall { session_id, id })
+                        if session_id == "proposal-session" && id == "proposal-tool"
+                ));
+                match event_rx.recv().await {
+                    Some(AppEvent::PermissionRequest { responder, .. }) => {
+                        responder.send("allow-once".to_string()).unwrap();
+                    }
+                    other => panic!(
+                        "expected PermissionRequest, got is_some={}",
+                        other.is_some()
+                    ),
+                }
+                let response = handle.await.unwrap().unwrap();
+                assert!(matches!(
+                    response.outcome,
+                    acp::schema::v1::RequestPermissionOutcome::Selected(_)
+                ));
+                assert!(manager.begin_validation(&channel).is_ok());
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn canonical_proposal_permission_is_cancelled_for_another_session() {
+        let manager =
+            Arc::new(crate::agent_tools::action_proposal::channel::ProposalChannelManager::new());
+        let payload = r#"{"schema_version":1,"origin":"terminal_agent","choices":[{"choice":1,"title":"run test","rationale":"","actions":[{"type":"send","input":"cargo test"}]}]}"#;
+        let channel = manager
+            .issue("different-session".into(), 1, None, false)
+            .unwrap();
+        let command =
+            crate::agent_tools::action_proposal::invocation::render(&channel, payload).unwrap();
+        let (client, mut event_rx) = proposal_test_client(Arc::clone(&manager));
+
+        let response = client
+            .request_permission(proposal_permission_request(&command))
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            response.outcome,
+            acp::schema::v1::RequestPermissionOutcome::Cancelled
+        ));
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(AppEvent::HideToolCall { .. })
+        ));
+        assert!(manager.begin_validation(&channel).is_ok());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn proposal_mcp_permission_auto_approves_once_without_consuming_proposal() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let manager = Arc::new(
+                    crate::agent_tools::action_proposal::channel::ProposalChannelManager::new(),
+                );
+                manager
+                    .issue("proposal-session".into(), 1, None, false)
+                    .unwrap();
+                let (client, mut event_rx) = proposal_test_client(Arc::clone(&manager));
+                let handle = tokio::task::spawn_local(async move {
+                    client
+                        .request_permission(proposal_mcp_permission_request())
+                        .await
+                });
+
+                assert!(matches!(
+                    event_rx.recv().await,
+                    Some(AppEvent::HideToolCall { session_id, id })
+                        if session_id == "proposal-session" && id == "proposal-mcp-tool"
+                ));
+                let response = tokio::time::timeout(Duration::from_secs(1), handle)
+                    .await
+                    .expect("Session MCP permission must not wait for user input")
+                    .unwrap()
+                    .unwrap();
+                assert!(matches!(
+                    response.outcome,
+                    acp::schema::v1::RequestPermissionOutcome::Selected(selected)
+                        if selected.option_id.to_string() == "allow-once"
+                ));
+                assert!(event_rx.try_recv().is_err());
+                assert!(manager.begin_mcp_validation("proposal-session").is_ok());
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn user_input_mcp_permission_auto_approves_once() {
+        use acp::schema::v1::{
+            PermissionOption, PermissionOptionKind, RequestPermissionRequest, ToolCallId,
+            ToolCallUpdate, ToolCallUpdateFields,
+        };
+
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let manager = Arc::new(
+                    crate::agent_tools::action_proposal::channel::ProposalChannelManager::new(),
+                );
+                let (client, mut event_rx) = proposal_test_client(manager);
+                let handle = tokio::task::spawn_local(async move {
+                    let mut request = RequestPermissionRequest::new(
+                        acp::schema::v1::SessionId::new("input-session"),
+                        ToolCallUpdate::new(
+                            ToolCallId::new("input-tool"),
+                            ToolCallUpdateFields::new()
+                                .title("intellterm_0123456789abcdef/request_user_input")
+                                .raw_input(serde_json::json!({
+                                    "question": "Choose",
+                                    "choices": ["A", "B"]
+                                })),
+                        ),
+                        vec![PermissionOption::new(
+                            "allow-once",
+                            "Allow once",
+                            PermissionOptionKind::AllowOnce,
+                        )],
+                    );
+                    stamp_server_identity(&mut request.meta, Some("intellterm_0123456789abcdef"));
+                    client.request_permission(request).await
+                });
+
+                assert!(matches!(
+                    event_rx.recv().await,
+                    Some(AppEvent::HideToolCall { session_id, id })
+                        if session_id == "input-session" && id == "input-tool"
+                ));
+                let response = tokio::time::timeout(Duration::from_secs(1), handle)
+                    .await
+                    .expect("Session MCP permission must not wait for user input")
+                    .unwrap()
+                    .unwrap();
+                assert!(matches!(
+                    response.outcome,
+                    acp::schema::v1::RequestPermissionOutcome::Selected(selected)
+                        if selected.option_id.to_string() == "allow-once"
+                ));
+                assert!(event_rx.try_recv().is_err());
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn session_mcp_permission_auto_approves_supported_tools_and_title_shapes() {
+        use acp::schema::v1::{PermissionOption, PermissionOptionKind};
+
+        for tool in SessionMcpTool::ALL {
+            for title in [
+                format!("intellterm_0123456789abcdef/{}", tool.name()),
+                format!("Use MCP tool: intellterm_0123456789abcdef/{}", tool.name()),
+                format!("intellterm_0123456789abcdef-{}", tool.name()),
+                format!("mcp__intellterm_0123456789abcdef__{}", tool.name()),
+            ] {
+                let manager = Arc::new(
+                    crate::agent_tools::action_proposal::channel::ProposalChannelManager::new(),
+                );
+                manager
+                    .issue("proposal-session".into(), 1, None, false)
+                    .unwrap();
+                let (client, mut events) = proposal_test_client(Arc::clone(&manager));
+                let mut request = proposal_mcp_permission_request();
+                request.tool_call.fields.title = Some(title.clone());
+                request.options = vec![
+                    PermissionOption::new("deny", "Deny", PermissionOptionKind::RejectOnce),
+                    PermissionOption::new("always", "Always", PermissionOptionKind::AllowAlways),
+                    PermissionOption::new("this-call", "Once", PermissionOptionKind::AllowOnce),
+                ];
+                let response = tokio::time::timeout(
+                    Duration::from_secs(1),
+                    client.request_permission(request),
+                )
+                .await
+                .expect("own MCP tools must skip the duplicate permission dialog")
+                .unwrap();
+                assert!(
+                    matches!(
+                        response.outcome,
+                        acp::schema::v1::RequestPermissionOutcome::Selected(selected)
+                            if selected.option_id.to_string() == "this-call"
+                    ),
+                    "{title}"
+                );
+                assert!(matches!(
+                    events.try_recv(),
+                    Ok(AppEvent::HideToolCall { .. })
+                ));
+                assert!(events.try_recv().is_err());
+                assert!(manager.begin_mcp_validation("proposal-session").is_ok());
+            }
+        }
+    }
+
+    async fn assert_permission_waits_for_user(
+        client: &WtaClient,
+        events: &mut mpsc::UnboundedReceiver<AppEvent>,
+        request: acp::schema::v1::RequestPermissionRequest,
+    ) {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            let selected_id = request.options[0].option_id.to_string();
+            let permission = client.request_permission(request);
+            tokio::pin!(permission);
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = &mut permission => panic!("permission resolved without user selection"),
+                    event = events.recv() => match event {
+                        Some(AppEvent::HideToolCall { .. }) => {}
+                        Some(AppEvent::PermissionRequest { responder, .. }) => {
+                            responder.send(selected_id.clone()).unwrap();
+                            break;
+                        }
+                        _ => panic!("expected interactive permission request"),
+                    }
+                }
+            }
+            let response = permission.await.unwrap();
+            assert!(matches!(
+                response.outcome,
+                acp::schema::v1::RequestPermissionOutcome::Selected(selected)
+                    if selected.option_id.to_string() == selected_id
+            ));
+            assert!(events.try_recv().is_err());
+        })
+        .await
+        .expect("interactive permission exchange timed out");
+    }
+
+    pub(crate) async fn assert_session_mcp_permission_contract(
+        server_name: &str,
+        tool_names: &[String],
+        meta: Option<acp::schema::v1::Meta>,
+        auto_approve: bool,
+    ) {
+        use acp::schema::v1::{SessionUpdate, ToolCall, ToolCallUpdate, ToolCallUpdateFields};
+
+        for name in tool_names {
+            for title in [
+                format!("{server_name}/{name}"),
+                format!("Use MCP tool: {server_name}/{name}"),
+                format!("{server_name}-{name}"),
+                format!("mcp__{server_name}__{name}"),
+            ] {
+                for source in ["permission", "tool-call", "tool-call-update"] {
+                    let manager = Arc::new(
+                        crate::agent_tools::action_proposal::channel::ProposalChannelManager::new(),
+                    );
+                    manager
+                        .issue("proposal-session".into(), 1, None, false)
+                        .unwrap();
+                    let (client, mut events) = proposal_test_client(manager);
+                    let mut request = proposal_mcp_permission_request();
+                    request.meta = meta.clone();
+                    request.tool_call.fields.title = Some(title.clone());
+                    if source != "permission" {
+                        let update = if source == "tool-call" {
+                            SessionUpdate::ToolCall(ToolCall::new("proposal-mcp-tool", &title))
+                        } else {
+                            SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                                "proposal-mcp-tool",
+                                ToolCallUpdateFields::new().title(&title),
+                            ))
+                        };
+                        let mut notification = session_mcp_notification("proposal-session", update);
+                        notification.meta = meta.clone();
+                        client.session_notification(notification).await.unwrap();
+                        assert_eq!(
+                            matches!(events.try_recv().unwrap(), AppEvent::HideToolCall { .. }),
+                            auto_approve,
+                            "{source}: {title}",
+                        );
+                        assert!(events.try_recv().is_err());
+                        request.tool_call.fields.title = None;
+                    }
+                    if auto_approve {
+                        let response = tokio::time::timeout(
+                            Duration::from_secs(1),
+                            client.request_permission(request),
+                        )
+                        .await
+                        .expect("published Session MCP tool must auto-approve")
+                        .unwrap();
+                        assert!(
+                            matches!(
+                                response.outcome,
+                                acp::schema::v1::RequestPermissionOutcome::Selected(selected)
+                                    if selected.option_id.to_string() == "allow-once"
+                            ),
+                            "{source}: {title}"
+                        );
+                        if source == "permission" {
+                            assert!(matches!(
+                                events.try_recv(),
+                                Ok(AppEvent::HideToolCall { .. })
+                            ));
+                        }
+                        assert!(events.try_recv().is_err());
+                    } else {
+                        assert_permission_waits_for_user(&client, &mut events, request).await;
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn session_mcp_permission_rejects_stale_or_conflicting_correlation() {
+        use acp::schema::v1::{SessionUpdate, ToolCall, ToolCallUpdate, ToolCallUpdateFields};
+
+        for source in ["tool-call", "tool-call-update"] {
+            for change in [
+                "missing",
+                "replaced",
+                "foreign-title",
+                "different-tool",
+                "foreign-update",
+            ] {
+                let manager = Arc::new(
+                    crate::agent_tools::action_proposal::channel::ProposalChannelManager::new(),
+                );
+                manager
+                    .issue("proposal-session".into(), 1, None, false)
+                    .unwrap();
+                let (client, mut events) = proposal_test_client(manager);
+                let title = "intellterm_0123456789abcdef/run_command_in_current_shell";
+                let update = if source == "tool-call" {
+                    SessionUpdate::ToolCall(ToolCall::new("proposal-mcp-tool", title))
+                } else {
+                    SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                        "proposal-mcp-tool",
+                        ToolCallUpdateFields::new().title(title),
+                    ))
+                };
+                client
+                    .session_notification(session_mcp_notification("proposal-session", update))
+                    .await
+                    .unwrap();
+                assert!(matches!(
+                    events.try_recv(),
+                    Ok(AppEvent::HideToolCall { .. })
+                ));
+                let mut request = proposal_mcp_permission_request();
+                request.tool_call.fields.title = None;
+                match change {
+                    "missing" => request.meta = None,
+                    "replaced" => stamp_server_identity(
+                        &mut request.meta,
+                        Some("intellterm_9876543210987654"),
+                    ),
+                    "foreign-title" => {
+                        request.tool_call.fields.title =
+                            Some("intellterm_9876543210987654/run_command_in_current_shell".into())
+                    }
+                    "different-tool" => {
+                        request.tool_call.fields.title = Some("request_user_input".into())
+                    }
+                    "foreign-update" => {
+                        client
+                            .session_notification(session_mcp_notification(
+                                "proposal-session",
+                                SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                                    "proposal-mcp-tool",
+                                    ToolCallUpdateFields::new().title(
+                                        "intellterm_9876543210987654/run_command_in_current_shell",
+                                    ),
+                                )),
+                            ))
+                            .await
+                            .unwrap();
+                        assert!(matches!(
+                            events.try_recv(),
+                            Ok(AppEvent::ToolCallUpdate { .. })
+                        ));
+                    }
+                    _ => unreachable!(),
+                }
+                assert_permission_waits_for_user(&client, &mut events, request).await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn session_mcp_permission_does_not_auto_approve_unqualified_or_foreign_tools() {
+        for title in [
+            "run_command_in_current_shell",
+            "request_user_input",
+            "intelligent_terminal/run_command_in_current_shell",
+            "Use MCP tool: other/run_command_in_current_shell",
+            "mcp__other__request_user_input",
+            "intellterm_0123456789abcde/run_command_in_current_shell",
+            "intellterm_9876543210987654/run_command_in_current_shell",
+            "mcp__intellterm_9876543210987654__request_user_input",
+            "intellterm_0123456789abcdef/unknown_tool",
+        ] {
+            let manager = Arc::new(
+                crate::agent_tools::action_proposal::channel::ProposalChannelManager::new(),
+            );
+            manager
+                .issue("proposal-session".into(), 1, None, false)
+                .unwrap();
+            let (client, mut events) = proposal_test_client(manager);
+            let mut request = proposal_mcp_permission_request();
+            request.tool_call.fields.title = Some(title.to_string());
+            assert_permission_waits_for_user(&client, &mut events, request).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn session_mcp_permission_without_allow_once_keeps_user_selection() {
+        let manager =
+            Arc::new(crate::agent_tools::action_proposal::channel::ProposalChannelManager::new());
+        manager
+            .issue("proposal-session".into(), 1, None, false)
+            .unwrap();
+        let (client, mut events) = proposal_test_client(manager);
+        let mut request = proposal_mcp_permission_request();
+        request.options = vec![acp::schema::v1::PermissionOption::new(
+            "always",
+            "Always",
+            acp::schema::v1::PermissionOptionKind::AllowAlways,
+        )];
+        assert_permission_waits_for_user(&client, &mut events, request).await;
+    }
+
+    #[tokio::test]
+    async fn session_mcp_permission_rejects_invalid_turn_channels_before_auto_approval() {
+        for state in ["missing", "other-session", "awaiting-user", "unavailable"] {
+            let manager = Arc::new(
+                crate::agent_tools::action_proposal::channel::ProposalChannelManager::new(),
+            );
+            if state != "missing" {
+                let session = if state == "other-session" {
+                    "other-session"
+                } else {
+                    "proposal-session"
+                };
+                manager.issue(session.into(), 1, None, false).unwrap();
+            }
+            if state == "awaiting-user" {
+                let context = manager.begin_mcp_validation("proposal-session").unwrap();
+                assert!(manager.accept_validation_detached(&context.proposal_id));
+            }
+            if state == "unavailable" {
+                manager.set_agent_transport_available(false);
+            }
+            let (client, mut events) = proposal_test_client(manager);
+            let response = client
+                .request_permission(proposal_mcp_permission_request())
+                .await
+                .unwrap();
+            assert!(
+                matches!(
+                    response.outcome,
+                    acp::schema::v1::RequestPermissionOutcome::Cancelled
+                ),
+                "{state}"
+            );
+            assert!(matches!(
+                events.try_recv(),
+                Ok(AppEvent::HideToolCall { .. })
+            ));
+            assert!(events.try_recv().is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn session_mcp_permission_correlates_only_matching_session_and_call_id() {
+        use acp::schema::v1::{SessionUpdate, ToolCall};
+
+        for (session, call_id) in [
+            ("proposal-session", "proposal-mcp-tool"),
+            ("other-session", "proposal-mcp-tool"),
+            ("proposal-session", "other-tool"),
+        ] {
+            let manager = Arc::new(
+                crate::agent_tools::action_proposal::channel::ProposalChannelManager::new(),
+            );
+            manager
+                .issue("proposal-session".into(), 1, None, false)
+                .unwrap();
+            let (client, mut events) = proposal_test_client(manager);
+            client
+                .session_notification(session_mcp_notification(
+                    session,
+                    SessionUpdate::ToolCall(ToolCall::new(
+                        call_id,
+                        "intellterm_0123456789abcdef/run_command_in_current_shell",
+                    )),
+                ))
+                .await
+                .unwrap();
+            assert!(matches!(
+                events.try_recv(),
+                Ok(AppEvent::HideToolCall { .. })
+            ));
+            let mut request = proposal_mcp_permission_request();
+            request.tool_call.fields.title = None;
+            if session == "proposal-session" && call_id == "proposal-mcp-tool" {
+                let response = tokio::time::timeout(
+                    Duration::from_secs(1),
+                    client.request_permission(request),
+                )
+                .await
+                .expect("correlated permission must auto-approve")
+                .unwrap();
+                assert!(matches!(
+                    response.outcome,
+                    acp::schema::v1::RequestPermissionOutcome::Selected(_)
+                ));
+                assert!(events.try_recv().is_err());
+            } else {
+                assert_permission_waits_for_user(&client, &mut events, request).await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn session_mcp_permission_does_not_trust_hidden_legacy_proposal_commands() {
+        use acp::schema::v1::{SessionId, SessionNotification, SessionUpdate, ToolCall};
+
+        let manager =
+            Arc::new(crate::agent_tools::action_proposal::channel::ProposalChannelManager::new());
+        let channel = manager
+            .issue("proposal-session".into(), 1, None, false)
+            .unwrap();
+        let payload = r#"{"schema_version":1,"origin":"terminal_agent","choices":[{"choice":1,"title":"run test","rationale":"","actions":[{"type":"send","input":"cargo test"}]}]}"#;
+        let command =
+            crate::agent_tools::action_proposal::invocation::render(&channel, payload).unwrap();
+        let (client, mut events) = proposal_test_client(manager);
+        client
+            .session_notification(SessionNotification::new(
+                SessionId::new("proposal-session"),
+                SessionUpdate::ToolCall(
+                    ToolCall::new("proposal-tool", "Run proposal")
+                        .raw_input(Some(serde_json::json!({"command": command}))),
+                ),
+            ))
+            .await
+            .unwrap();
+        assert!(matches!(
+            events.try_recv(),
+            Ok(AppEvent::HideToolCall { .. })
+        ));
+        assert_permission_waits_for_user(
+            &client,
+            &mut events,
+            proposal_permission_request(&command),
+        )
+        .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dropped_user_input_extension_cancels_its_modal() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let manager = Arc::new(
+                    crate::agent_tools::action_proposal::channel::ProposalChannelManager::new(),
+                );
+                let (client, mut event_rx) = proposal_test_client(manager);
+                let params = serde_json::value::to_raw_value(
+                    &crate::agent_tools::session_mcp::UserInputHelperRequest {
+                        request_id: "request-1".into(),
+                        session_id: "input-session".into(),
+                        request: crate::agent_tools::user_input::UserInputRequest {
+                            question: "Choose".into(),
+                            choices: vec!["A".into()],
+                            allow_freeform: false,
+                        },
+                    },
+                )
+                .unwrap();
+                let task = tokio::task::spawn_local(async move {
+                    client
+                        .request_user_input(acp::schema::v1::ExtRequest::new(
+                            crate::agent_tools::session_mcp::USER_INPUT_HELPER_REQUEST_METHOD,
+                            params.into(),
+                        ))
+                        .await
+                });
+
+                assert!(matches!(
+                    event_rx.recv().await,
+                    Some(AppEvent::UserInputRequest {
+                        request_id,
+                        session_id,
+                        ..
+                    }) if request_id == "request-1" && session_id == "input-session"
+                ));
+                task.abort();
+                let _ = task.await;
+                assert!(matches!(
+                    event_rx.recv().await,
+                    Some(AppEvent::CancelUserInputRequest {
+                        request_id,
+                        session_id,
+                    }) if request_id == "request-1" && session_id == "input-session"
+                ));
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn user_input_extension_returns_the_modal_answer() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let manager = Arc::new(
+                    crate::agent_tools::action_proposal::channel::ProposalChannelManager::new(),
+                );
+                let (client, mut event_rx) = proposal_test_client(manager);
+                let params = serde_json::value::to_raw_value(
+                    &crate::agent_tools::session_mcp::UserInputHelperRequest {
+                        request_id: "request-2".into(),
+                        session_id: "input-session".into(),
+                        request: crate::agent_tools::user_input::UserInputRequest {
+                            question: "Choose".into(),
+                            choices: vec!["A".into(), "B".into()],
+                            allow_freeform: false,
+                        },
+                    },
+                )
+                .unwrap();
+                let task = tokio::task::spawn_local(async move {
+                    client
+                        .request_user_input(acp::schema::v1::ExtRequest::new(
+                            crate::agent_tools::session_mcp::USER_INPUT_HELPER_REQUEST_METHOD,
+                            params.into(),
+                        ))
+                        .await
+                });
+
+                let responder = match event_rx.recv().await {
+                    Some(AppEvent::UserInputRequest { responder, .. }) => responder,
+                    _ => panic!("expected user input request"),
+                };
+                responder
+                    .send(
+                        crate::agent_tools::user_input::UserInputResponse::Answered {
+                            answer: "B".into(),
+                            selected_index: Some(1),
+                        },
+                    )
+                    .unwrap();
+                let response = task.await.unwrap().unwrap();
+                let decoded: crate::agent_tools::user_input::UserInputResponse =
+                    serde_json::from_str(response.0.get()).unwrap();
+                assert_eq!(
+                    decoded,
+                    crate::agent_tools::user_input::UserInputResponse::Answered {
+                        answer: "B".into(),
+                        selected_index: Some(1),
+                    }
+                );
+                assert!(event_rx.try_recv().is_err());
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn proposal_mcp_extension_validates_and_commits_on_the_owning_helper() {
+        let manager =
+            Arc::new(crate::agent_tools::action_proposal::channel::ProposalChannelManager::new());
+        manager
+            .issue("proposal-session".into(), 1, None, false)
+            .unwrap();
+        let (client, mut event_rx) = proposal_test_client(Arc::clone(&manager));
+        let params =
+            serde_json::value::to_raw_value(&crate::agent_tools::session_mcp::HelperRequest {
+                session_id: "proposal-session".to_string(),
+                tool: "run_command_in_current_shell".to_string(),
+                arguments: serde_json::json!({
+                    "summary": "Run test",
+                    "command": "cargo test"
+                }),
+            })
+            .unwrap();
+        let request = acp::schema::v1::ExtRequest::new(
+            crate::agent_tools::session_mcp::HELPER_REQUEST_METHOD,
+            params.into(),
+        );
+
+        let call = client.request_terminal_actions(request);
+        let ui = async {
+            let proposal_id = match event_rx.recv().await.unwrap() {
+                AppEvent::DirectTerminalActionProposal {
+                    context,
+                    payload,
+                    source,
+                    responder,
+                    ..
+                } => {
+                    assert_eq!(
+                        source,
+                        crate::agent_tools::action_proposal::pipe::ProposalPayloadSource::Mcp(
+                            crate::agent_tools::action_proposal::schema::McpActionTool::RunCommandInCurrentShell
+                        )
+                    );
+                    assert_eq!(
+                        serde_json::from_str::<serde_json::Value>(&payload).unwrap(),
+                        serde_json::json!({
+                            "summary": "Run test",
+                            "command": "cargo test"
+                        })
+                    );
+                    responder
+                        .send(
+                            crate::agent_tools::action_proposal::pipe::ProposalValidationDecision::accepted(),
+                        )
+                        .unwrap();
+                    context.proposal_id
+                }
+                _ => panic!("expected proposal validation event"),
+            };
+            match event_rx.recv().await.unwrap() {
+                AppEvent::DirectTerminalActionProposalCommit {
+                    proposal_id: committed,
+                    responder,
+                } => {
+                    assert_eq!(committed, proposal_id);
+                    responder.send(true).unwrap();
+                }
+                _ => panic!("expected proposal commit event"),
+            }
+        };
+        let (response, ()) = tokio::join!(call, ui);
+        let response = response.unwrap();
+        let validation: crate::agent_tools::action_proposal::pipe::ProposalValidationResponse =
+            serde_json::from_str(response.0.get()).unwrap();
+        assert_eq!(
+            validation.status,
+            crate::agent_tools::action_proposal::channel::ProposalValidationStatus::Accepted
+        );
+    }
+
+    #[tokio::test]
+    async fn noncanonical_proposal_permission_is_silently_cancelled() {
+        let manager =
+            Arc::new(crate::agent_tools::action_proposal::channel::ProposalChannelManager::new());
+        let channel = manager
+            .issue("proposal-session".into(), 1, None, false)
+            .unwrap();
+        let command = format!(
+            "'{{}}' | & \"$env:WTA_CLI_PATH\" propose-terminal-actions --channel {channel}"
+        );
+        let (client, mut event_rx) = proposal_test_client(manager);
+
+        let response = client
+            .request_permission(proposal_permission_request(&command))
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            response.outcome,
+            acp::schema::v1::RequestPermissionOutcome::Cancelled
+        ));
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(AppEvent::HideToolCall { .. })
+        ));
+    }
+
+    /// Each `ToolKind` that has a visual cue maps to a distinct, stable
+    /// glyph — not a translatable word (see `tool_call_kind_label`'s doc
+    /// comment: kind labels are exactly the kind of ambiguous 1-2-word
+    /// string this repo's 85+-locale localization flags as
+    /// mistranslation-prone, e.g. "Execute" reading as "kill"). Kinds with
+    /// no useful visual framing (`Think`, `SwitchMode`, `Other`) get `None`
+    /// so the permission card just shows the title alone.
+    #[test]
+    fn tool_call_kind_label_maps_each_kind_to_a_stable_glyph() {
+        use acp::schema::v1::ToolKind;
+        assert_eq!(tool_call_kind_label(Some(&ToolKind::Read)), Some("→"));
+        assert_eq!(tool_call_kind_label(Some(&ToolKind::Search)), Some("→"));
+        assert_eq!(tool_call_kind_label(Some(&ToolKind::Move)), Some("→"));
+        assert_eq!(tool_call_kind_label(Some(&ToolKind::Edit)), Some("✎"));
+        assert_eq!(tool_call_kind_label(Some(&ToolKind::Delete)), Some("✕"));
+        assert_eq!(tool_call_kind_label(Some(&ToolKind::Execute)), Some("$"));
+        assert_eq!(tool_call_kind_label(Some(&ToolKind::Fetch)), Some("%"));
+        assert_eq!(tool_call_kind_label(Some(&ToolKind::Think)), None);
+        assert_eq!(tool_call_kind_label(Some(&ToolKind::SwitchMode)), None);
+        assert_eq!(tool_call_kind_label(Some(&ToolKind::Other)), None);
+        assert_eq!(tool_call_kind_label(None), None);
+    }
+
+    #[test]
+    fn post_login_authenticate_auth_required_routes_to_recovery_failure() {
+        let err = post_login_authenticate_error("copilot-login", &acp::Error::auth_required());
+        let failure =
+            crate::protocol::acp::failure::classify_anyhow(&err, HandshakeStage::Authenticate);
+        assert!(
+            matches!(failure, AgentFailure::AuthRequired { .. }),
+            "AuthRequired from post-login authenticate should stay recoverable, got {failure:?}"
+        );
+    }
+
+    #[test]
+    fn post_login_authenticate_non_auth_stays_authenticate_handshake_failure() {
+        let err = post_login_authenticate_error("copilot-login", &acp::Error::new(-32603, "boom"));
+        let failure =
+            crate::protocol::acp::failure::classify_anyhow(&err, HandshakeStage::Authenticate);
+        assert!(
+            matches!(
+                failure,
+                AgentFailure::HandshakeFailed {
+                    stage: HandshakeStage::Authenticate,
+                    ..
+                }
+            ),
+            "non-auth authenticate errors should not trigger fresh-master recovery, got {failure:?}"
+        );
+    }
+
+    /// Helper-only: round-trip a `_meta` blob through `inject_wta_pane_meta`
+    /// and report the `pane_session_id` that the master would see in
+    /// `extract_wta_meta`. Returns `None` when the meta is empty after
+    /// injection (i.e. `WT_SESSION` was missing/empty and we correctly
+    /// emitted no namespace).
+    fn injected_pane_session_id() -> Option<String> {
+        let mut meta: Option<agent_client_protocol::schema::v1::Meta> = None;
+        inject_wta_pane_meta(&mut meta, false);
+        crate::session_registry::extract_wta_meta(&mut meta).pane_session_id
+    }
+
+    #[test]
+    fn inject_wta_pane_meta_injects_lowercased_pane_session_id_with_braces_stripped() {
+        let _g = crate::test_support::lock_env();
+        // SAFETY: env is process-global; lock_env serializes parallel tests.
+        unsafe {
+            std::env::set_var("WT_SESSION", "{A86EAF3B-1234-5678-9ABC-DEF012345678}");
+        }
+        assert_eq!(
+            injected_pane_session_id(),
+            Some("a86eaf3b-1234-5678-9abc-def012345678".to_string()),
+            "WT_SESSION should be lowercased and have braces stripped before going on the wire",
+        );
+        unsafe { std::env::remove_var("WT_SESSION") };
+    }
+
+    #[test]
+    fn inject_wta_pane_meta_is_noop_when_wt_session_is_absent() {
+        let _g = crate::test_support::lock_env();
+        unsafe { std::env::remove_var("WT_SESSION") };
+        assert_eq!(
+            injected_pane_session_id(),
+            None,
+            "no WT_SESSION → master must not record a phantom pane binding",
+        );
+    }
+
+    #[test]
+    fn inject_wta_pane_meta_is_noop_when_wt_session_is_empty() {
+        let _g = crate::test_support::lock_env();
+        unsafe { std::env::set_var("WT_SESSION", "") };
+        assert_eq!(injected_pane_session_id(), None);
+        unsafe { std::env::remove_var("WT_SESSION") };
+    }
+
+    #[test]
+    fn inject_wta_pane_meta_is_noop_when_wt_session_is_only_braces() {
+        let _g = crate::test_support::lock_env();
+        unsafe { std::env::set_var("WT_SESSION", "{}") };
+        assert_eq!(
+            injected_pane_session_id(),
+            None,
+            "stripping braces from `{{}}` leaves the empty string — must not write `pane_session_id`: \"\"",
+        );
+        unsafe { std::env::remove_var("WT_SESSION") };
+    }
+
+    #[test]
+    fn inject_wta_pane_meta_requests_master_http_mcp_without_wt_session() {
+        let _g = crate::test_support::lock_env();
+        unsafe { std::env::remove_var("WT_SESSION") };
+        let mut meta: Option<agent_client_protocol::schema::v1::Meta> = None;
+        inject_wta_pane_meta(&mut meta, true);
+        let extracted = crate::session_registry::extract_wta_meta(&mut meta);
+        assert_eq!(extracted.proposal_mcp.as_deref(), Some("http-v1"));
+    }
+
+    #[test]
+    fn session_mcp_tool_title_accepts_supported_permission_shapes() {
+        let dynamic = "intellterm_0123456789abcdef";
+        for tool in crate::agent_tools::action_proposal::schema::McpActionTool::ALL {
+            let name = tool.tool_name();
+            for title in [
+                format!("{dynamic}/{name}"),
+                format!("{dynamic}-{name}"),
+                format!("Use MCP tool: {dynamic}/{name}"),
+                format!("mcp__{dynamic}__{name}"),
+            ] {
+                assert_eq!(
+                    SessionMcpTool::from_title(Some(&title), dynamic),
+                    Some(SessionMcpTool::TerminalAction(tool)),
+                    "{title}"
+                );
+            }
+        }
+        assert_eq!(
+            SessionMcpTool::from_title(
+                Some(&format!("Use MCP tool: {dynamic}/request_user_input")),
+                dynamic
+            ),
+            Some(SessionMcpTool::UserInput)
+        );
+        for title in [
+            "run_command_in_current_shell",
+            "create_workspace",
+            "delegate_task_in_new_workspace",
+            "request_user_input",
+            "run_command",
+            "open_workspace",
+            "run_command_in_workspace",
+            "delegate_task",
+            "intellterm_01234567890123456789/run_command_in_current_shell",
+            "intellterm_0123456789abcde/run_command_in_current_shell",
+            "intellterm_0123456789abcdeA/run_command_in_current_shell",
+            "Use MCP tool: other/run_command_in_current_shell",
+            "Use MCP tool: intelligent_terminal/terminal_send",
+            "Use MCP tool: intelligent_terminal/terminal_open",
+            "Use MCP tool: intelligent_terminal/terminal_open_and_send",
+            "Use MCP tool: intelligent_terminal/run_command",
+            "Use MCP tool: intelligent_terminal/open_workspace",
+            "Use MCP tool: intelligent_terminal/run_command_in_workspace",
+            "Use MCP tool: intelligent_terminal/delegate_task",
+            // The superseded single-tool name is no longer a tool.
+            "Use MCP tool: intelligent_terminal/request_terminal_actions",
+            "mcp__intellterm_0123456789abcdef__request_terminal_actions",
+        ] {
+            assert_eq!(
+                SessionMcpTool::from_title(Some(title), dynamic),
+                None,
+                "{title}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn session_mcp_display_keeps_bare_schema_valid_action_calls_visible() {
+        use crate::agent_tools::action_proposal::schema::McpActionTool;
+
+        let manager =
+            Arc::new(crate::agent_tools::action_proposal::channel::ProposalChannelManager::new());
+        let (client, mut event_rx) = proposal_test_client(manager);
+        for (tool, arguments) in [
+            (
+                McpActionTool::RunCommandInCurrentShell,
+                serde_json::json!({"summary":"Run tests","command":"cargo test"}),
+            ),
+            (
+                McpActionTool::CreateWorkspace,
+                serde_json::json!({
+                    "summary":"Run tests separately",
+                    "command":"cargo test",
+                    "placement":"new_split"
+                }),
+            ),
+            (
+                McpActionTool::DelegateTaskInNewWorkspace,
+                serde_json::json!({
+                    "summary":"Investigate failures",
+                    "task":"Find and fix the failing tests.",
+                    "placement":"new_tab"
+                }),
+            ),
+        ] {
+            let tool_call_id = format!("provider-{}", tool.tool_name());
+            client
+                .session_notification(acp::schema::v1::SessionNotification::new(
+                    acp::schema::v1::SessionId::new("provider-session"),
+                    acp::schema::v1::SessionUpdate::ToolCall(
+                        acp::schema::v1::ToolCall::new(
+                            acp::schema::v1::ToolCallId::new(tool_call_id.as_str()),
+                            tool.tool_name(),
+                        )
+                        .raw_input(Some(arguments)),
+                    ),
+                ))
+                .await
+                .unwrap();
+
+            assert!(matches!(
+                event_rx.try_recv(),
+                Ok(AppEvent::ToolCall {
+                    session_id,
+                    id,
+                    title,
+                    ..
+                }) if session_id == "provider-session"
+                    && id == tool_call_id
+                    && title == tool.tool_name()
+            ));
+        }
+        assert!(event_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn session_mcp_display_hides_namespace_qualified_calls() {
+        let manager =
+            Arc::new(crate::agent_tools::action_proposal::channel::ProposalChannelManager::new());
+        let (client, mut event_rx) = proposal_test_client(manager);
+        client
+            .session_notification(session_mcp_notification(
+                "proposal-session",
+                acp::schema::v1::SessionUpdate::ToolCall(acp::schema::v1::ToolCall::new(
+                    acp::schema::v1::ToolCallId::new("qualified-tool"),
+                    "intellterm_0123456789abcdef/run_command_in_current_shell",
+                )),
+            ))
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(AppEvent::HideToolCall { session_id, id })
+                if session_id == "proposal-session" && id == "qualified-tool"
+        ));
+        assert!(event_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn session_mcp_display_keeps_stable_namespace_calls_visible() {
+        let manager =
+            Arc::new(crate::agent_tools::action_proposal::channel::ProposalChannelManager::new());
+        let (client, mut event_rx) = proposal_test_client(manager);
+
+        client
+            .session_notification(acp::schema::v1::SessionNotification::new(
+                acp::schema::v1::SessionId::new("provider-session"),
+                acp::schema::v1::SessionUpdate::ToolCall(acp::schema::v1::ToolCall::new(
+                    acp::schema::v1::ToolCallId::new("stable-tool"),
+                    "intelligent_terminal/run_command_in_current_shell",
+                )),
+            ))
+            .await
+            .unwrap();
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(AppEvent::ToolCall { id, .. }) if id == "stable-tool"
+        ));
+
+        client
+            .session_notification(acp::schema::v1::SessionNotification::new(
+                acp::schema::v1::SessionId::new("provider-session"),
+                acp::schema::v1::SessionUpdate::ToolCallUpdate(
+                    acp::schema::v1::ToolCallUpdate::new(
+                        acp::schema::v1::ToolCallId::new("stable-update"),
+                        acp::schema::v1::ToolCallUpdateFields::new()
+                            .title("intelligent_terminal-run_command_in_current_shell"),
+                    ),
+                ),
+            ))
+            .await
+            .unwrap();
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(AppEvent::ToolCallUpdate { id, .. }) if id == "stable-update"
+        ));
+        assert!(event_rx.try_recv().is_err());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn session_mcp_display_hides_calls_correlated_by_tool_call_id() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let manager = Arc::new(
+                    crate::agent_tools::action_proposal::channel::ProposalChannelManager::new(),
+                );
+                manager
+                    .issue("proposal-session".into(), 1, None, false)
+                    .unwrap();
+                let (client, mut event_rx) = proposal_test_client(manager);
+                let request_client = client.clone();
+                let handle = tokio::task::spawn_local(async move {
+                    request_client
+                        .request_permission(proposal_mcp_permission_request())
+                        .await
+                });
+
+                assert!(matches!(
+                    event_rx.recv().await,
+                    Some(AppEvent::HideToolCall { session_id, id })
+                        if session_id == "proposal-session" && id == "proposal-mcp-tool"
+                ));
+                let response = tokio::time::timeout(Duration::from_secs(1), handle)
+                    .await
+                    .expect("Session MCP permission must not wait for user input")
+                    .unwrap()
+                    .unwrap();
+                assert!(matches!(
+                    response.outcome,
+                    acp::schema::v1::RequestPermissionOutcome::Selected(_)
+                ));
+
+                client
+                    .session_notification(session_mcp_notification(
+                        "proposal-session",
+                        acp::schema::v1::SessionUpdate::ToolCall(
+                            acp::schema::v1::ToolCall::new(
+                                acp::schema::v1::ToolCallId::new("proposal-mcp-tool"),
+                                "run_command_in_current_shell",
+                            )
+                            .raw_input(Some(serde_json::json!({
+                                "summary": "Run test",
+                                "command": "cargo test"
+                            }))),
+                        ),
+                    ))
+                    .await
+                    .unwrap();
+
+                assert!(
+                    event_rx.try_recv().is_err(),
+                    "the correlated tool call must remain hidden"
+                );
+            })
+            .await;
+    }
+
+    /// Regression for the cross-window focus bug: the helper-over-pipe
+    /// `session/load` path must inject `_meta.wta.pane_session_id`
+    /// alongside the request so master's `SessionInfo.pane_session_id`
+    /// for the resumed sid points at THIS pane's GUID. Without the
+    /// binding the row in a sibling window's session management list appears live but
+    /// `decide_enter_action` returns `NotResumable { LiveWithoutPane }`
+    /// and the user sees "Cannot focus session …: it appears live but
+    /// no pane GUID is bound yet."
+    ///
+    /// Exercises the same shape of code as the actual call site
+    /// (build `LoadSessionRequest` + call `inject_wta_pane_meta` on its
+    /// meta field) and asserts master would extract the same pane id
+    /// via `extract_wta_meta`.
+    #[test]
+    fn load_session_request_carries_pane_session_id_after_injection() {
+        use agent_client_protocol as acp;
+        let _g = crate::test_support::lock_env();
+        unsafe {
+            std::env::set_var("WT_SESSION", "{B1234567-89AB-CDEF-0123-456789ABCDEF}");
+        }
+
+        let sid = acp::schema::v1::SessionId::new("sess-target".to_string());
+        let cwd = std::path::PathBuf::from("/repo");
+        let mut req = acp::schema::v1::LoadSessionRequest::new(sid, cwd);
+        assert!(req.meta.is_none(), "fresh LoadSessionRequest has no meta");
+
+        inject_wta_pane_meta(&mut req.meta, false);
+
+        let extracted = crate::session_registry::extract_wta_meta(&mut req.meta);
+        assert_eq!(
+            extracted.pane_session_id.as_deref(),
+            Some("b1234567-89ab-cdef-0123-456789abcdef"),
+            "master must be able to extract the pane GUID from the load_session request"
+        );
+
+        unsafe { std::env::remove_var("WT_SESSION") };
+    }
+
+    #[test]
+    fn parses_model_from_separate_flag() {
+        let profile = crate::agent_registry::lookup_profile("copilot");
+        let args = ["--acp", "--stdio", "--model", "claude-haiku-4.5"];
+        assert_eq!(
+            crate::agent_registry::extract_model_from_args(&args, profile),
+            Some("claude-haiku-4.5")
+        );
+    }
+
+    #[test]
+    fn gemini_method_not_found_is_a_redundant_startup_model_error() {
+        let identity = PromptUsageIdentity {
+            family_id: Some("gemini".to_string()),
+            reporter_id: Some("gemini-cli".to_string()),
+        };
+
+        assert!(is_redundant_startup_model_error(
+            &identity,
+            &acp::Error::method_not_found(),
+        ));
+        assert!(!is_redundant_startup_model_error(
+            &PromptUsageIdentity {
+                family_id: Some("copilot".to_string()),
+                reporter_id: Some("gemini-cli".to_string()),
+            },
+            &acp::Error::method_not_found(),
+        ));
+        assert!(!is_redundant_startup_model_error(
+            &PromptUsageIdentity {
+                family_id: Some("gemini".to_string()),
+                reporter_id: Some("impostor-gemini".to_string()),
+            },
+            &acp::Error::method_not_found(),
+        ));
+        assert!(!is_redundant_startup_model_error(
+            &identity,
+            &acp::Error::internal_error(),
+        ));
+    }
+
+    #[tokio::test]
+    async fn successful_prompt_completion_emits_message_end_only() {
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let prompt_timing = PromptTimingState::default();
+
+        complete_prompt_request(
+            Ok::<(), acp::Error>(()),
+            None,
+            &prompt_timing,
+            &event_tx,
+            "test-session".to_string(),
+        )
+        .await;
+
+        match event_rx.try_recv() {
+            Ok(AppEvent::AgentMessageEnd { session_id }) => {
+                assert_eq!(session_id, "test-session");
+            }
+            Ok(_) => panic!("expected AgentMessageEnd"),
+            Err(err) => panic!("expected AgentMessageEnd, got channel error: {err}"),
+        }
+        assert!(event_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn soft_stop_emits_message_end_then_soft_stop() {
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let prompt_timing = PromptTimingState::default();
+
+        complete_prompt_request(
+            Ok::<(), acp::Error>(()),
+            Some(SoftStopReason::Refusal),
+            &prompt_timing,
+            &event_tx,
+            "test-session".to_string(),
+        )
+        .await;
+
+        // Order matters: the turn-closing AgentMessageEnd must land first so the
+        // soft-stop notice appends after the agent's streamed content.
+        match event_rx.try_recv() {
+            Ok(AppEvent::AgentMessageEnd { session_id }) => {
+                assert_eq!(session_id, "test-session");
+            }
+            Ok(_) => panic!("expected AgentMessageEnd first"),
+            Err(err) => panic!("expected AgentMessageEnd first, got channel error: {err}"),
+        }
+        match event_rx.try_recv() {
+            Ok(AppEvent::AgentSoftStop { session_id, reason }) => {
+                assert_eq!(session_id, "test-session");
+                assert_eq!(reason, SoftStopReason::Refusal);
+            }
+            Ok(_) => panic!("expected AgentSoftStop second"),
+            Err(err) => panic!("expected AgentSoftStop second, got channel error: {err}"),
+        }
+        assert!(event_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn failed_prompt_completion_emits_error_only() {
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let prompt_timing = PromptTimingState::default();
+
+        complete_prompt_request(
+            Err::<(), acp::Error>(acp::Error::new(-32603, "boom")),
+            None,
+            &prompt_timing,
+            &event_tx,
+            "test-session".to_string(),
+        )
+        .await;
+
+        match event_rx.try_recv() {
+            Ok(AppEvent::AgentError {
+                session_id,
+                failure,
+                message,
+            }) => {
+                assert_eq!(session_id.as_deref(), Some("test-session"));
+                assert_eq!(message, "prompt error: boom");
+                assert_eq!(
+                    failure,
+                    crate::protocol::acp::failure::AgentFailure::Protocol {
+                        code: -32603,
+                        message: "boom".to_string(),
+                    }
+                );
+            }
+            Ok(_) => panic!("expected AgentError"),
+            Err(err) => panic!("expected AgentError, got channel error: {err}"),
+        }
+        assert!(event_rx.try_recv().is_err());
+    }
+
+    // ── telemetry failure-field mapping ─────────────────────────────────────
+
+    /// `acp_result_failure_fields` reports no failure for `Ok`, and surfaces
+    /// the ACP error code (as i32) under the `AcpError` kind for `Err`.
+    #[test]
+    fn acp_result_failure_fields_maps_ok_and_err() {
+        let ok: acp::Result<()> = Ok(());
+        assert_eq!(acp_result_failure_fields(&ok), ("", 0));
+
+        let err: acp::Result<()> = Err(acp::Error::new(-32603, "boom"));
+        assert_eq!(acp_result_failure_fields(&err), ("AcpError", -32603));
+    }
+
+    /// `timeout_result_failure_fields` forwards the inner ACP result when the
+    /// call completed in time (both Ok and Err), and reports the `Timeout`
+    /// kind only when the outer future actually elapsed.
+    #[tokio::test]
+    async fn timeout_result_failure_fields_maps_inner_and_elapsed() {
+        // Completed in time, inner Ok → no failure.
+        let inner_ok: Result<acp::Result<()>, tokio::time::error::Elapsed> = Ok(Ok(()));
+        assert_eq!(timeout_result_failure_fields(&inner_ok), ("", 0));
+
+        // Completed in time, inner Err → surface the ACP error code.
+        let inner_err: Result<acp::Result<()>, tokio::time::error::Elapsed> =
+            Ok(Err(acp::Error::new(-32000, "nope")));
+        assert_eq!(
+            timeout_result_failure_fields(&inner_err),
+            ("AcpError", -32000)
+        );
+
+        // Outer future elapsed → Timeout, no ACP code.
+        let elapsed = tokio::time::timeout(std::time::Duration::ZERO, std::future::pending::<()>())
+            .await
+            .expect_err("a zero-duration timeout over a pending future must elapse");
+        let timed_out: Result<acp::Result<()>, tokio::time::error::Elapsed> = Err(elapsed);
+        assert_eq!(timeout_result_failure_fields(&timed_out), ("Timeout", 0));
+    }
+
+    #[test]
+    fn build_prompt_content_text_only_is_single_text_block() {
+        let content = super::build_prompt_content("hello", &[]);
+        assert_eq!(content.len(), 1);
+        match &content[0] {
+            acp::schema::v1::ContentBlock::Text(t) => assert_eq!(t.text, "hello"),
+            other => panic!("expected text block, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_prompt_content_appends_image_blocks_after_text() {
+        let images = vec![
+            crate::clipboard_image::PastedImage {
+                data_base64: "AAA=".to_string(),
+                mime_type: "image/png".to_string(),
+                label: "screenshot".to_string(),
+            },
+            crate::clipboard_image::PastedImage {
+                data_base64: "BBB=".to_string(),
+                mime_type: "image/jpeg".to_string(),
+                label: "photo.jpg".to_string(),
+            },
+        ];
+        let content = super::build_prompt_content("look at these", &images);
+        assert_eq!(content.len(), 3, "1 text + 2 image blocks");
+        assert!(matches!(content[0], acp::schema::v1::ContentBlock::Text(_)));
+        match (&content[1], &content[2]) {
+            (acp::schema::v1::ContentBlock::Image(a), acp::schema::v1::ContentBlock::Image(b)) => {
+                assert_eq!(a.data, "AAA=");
+                assert_eq!(a.mime_type, "image/png");
+                assert_eq!(b.data, "BBB=");
+                assert_eq!(b.mime_type, "image/jpeg");
+            }
+            other => panic!("expected two image blocks, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_prompt_content_image_only_keeps_empty_leading_text_block() {
+        // Image-only paste (no typed text) still ships a (empty) text block
+        // first so the agent's content array always leads with text.
+        let images = vec![crate::clipboard_image::PastedImage {
+            data_base64: "ZZZ=".to_string(),
+            mime_type: "image/png".to_string(),
+            label: "screenshot".to_string(),
+        }];
+        let content = super::build_prompt_content("", &images);
+        assert_eq!(content.len(), 2);
+        assert!(matches!(content[0], acp::schema::v1::ContentBlock::Text(_)));
+        assert!(matches!(
+            content[1],
+            acp::schema::v1::ContentBlock::Image(_)
+        ));
+    }
+
+    /// Test the helper's mirror of master's session-broadcast feed.
+    ///
+    /// `WtaClient::ext_notification` is the helper's sole inbound path
+    /// for `intellterm.wta/session_{added,removed}` extension
+    /// notifications. It must translate them into the matching
+    /// `AppEvent::AliveSession{Added,Removed}` variants so the App
+    /// event loop — the single writer to `App.alive` — can keep the
+    /// per-helper registry mirror consistent. The tests below
+    /// construct a `WtaClient` with a fake `event_tx` and assert the
+    /// translation contract: well-formed notifications produce typed
+    /// events, malformed/unknown notifications produce nothing (and do
+    /// not tear down the connection).
+    mod ext_notification_tests {
+        use super::super::{ClientState, WtaClient};
+        use crate::app_contracts::AppEvent;
+        use crate::session_registry::{
+            build_session_added_notification, build_session_removed_notification,
+            INTELLTERM_METHOD_SESSION_REMOVED,
+        };
+        use crate::shell::ShellManager;
+        use agent_client_protocol::{self as acp};
+        use std::path::PathBuf;
+        use std::sync::{Arc, Mutex};
+        use tokio::sync::mpsc;
+
+        fn make_client() -> (WtaClient, mpsc::UnboundedReceiver<AppEvent>) {
+            let (tx, rx) = mpsc::unbounded_channel();
+            let state = Arc::new(ClientState {
+                event_tx: tx,
+                shell_mgr: Arc::new(ShellManager::new()),
+                prompt_timing: Arc::new(super::super::PromptTimingState::default()),
+                native_yolo: Arc::new(crate::protocol::acp::native_yolo::NativeYoloState::new()),
+                yolo_state: Arc::new(Mutex::new(crate::app_contracts::YoloState::new(
+                    false, false,
+                ))),
+                provider_probe_capture: super::super::ProviderProbeCapture::default(),
+                standard_usage_sessions: std::sync::Mutex::new(std::collections::HashSet::new()),
+                proposal_channels: Arc::new(
+                    crate::agent_tools::action_proposal::channel::ProposalChannelManager::new(),
+                ),
+                hidden_tool_calls: std::sync::Mutex::new(std::collections::HashMap::new()),
+                origin_scope: std::sync::OnceLock::new(),
+            });
+            (WtaClient { state }, rx)
+        }
+
+        #[tokio::test]
+        async fn session_added_translates_to_alive_session_added_event() {
+            let (client, mut rx) = make_client();
+            let info = crate::session_registry::SessionInfo::new(
+                acp::schema::v1::SessionId::new("sess-1".to_string()),
+                PathBuf::from("/work"),
+            )
+            .with_pane_session_id("pane-A".to_string());
+            let ext = build_session_added_notification(&info);
+
+            client.ext_notification(ext).await.unwrap();
+
+            match rx.try_recv() {
+                Ok(AppEvent::AliveSessionAdded(got)) => {
+                    assert_eq!(got.session_id, info.session_id);
+                    assert_eq!(got.pane_session_id.as_deref(), Some("pane-A"));
+                    assert_eq!(got.cwd, info.cwd);
+                }
+                other => panic!(
+                    "expected AliveSessionAdded, got something else: {}",
+                    match &other {
+                        Ok(_) => "Ok(<other variant>)",
+                        Err(_) => "Err(<recv error>)",
+                    }
+                ),
+            }
+            assert!(rx.try_recv().is_err(), "exactly one event emitted");
+        }
+
+        #[tokio::test]
+        async fn session_removed_translates_to_alive_session_removed_event() {
+            let (client, mut rx) = make_client();
+            let sid = acp::schema::v1::SessionId::new("sess-dead".to_string());
+            let ext = build_session_removed_notification(&sid);
+
+            client.ext_notification(ext).await.unwrap();
+
+            match rx.try_recv() {
+                Ok(AppEvent::AliveSessionRemoved(got)) => {
+                    assert_eq!(got.session_id, sid);
+                    assert!(got.history_key.is_none());
+                }
+                other => panic!(
+                    "expected AliveSessionRemoved, got something else: {}",
+                    match &other {
+                        Ok(_) => "Ok(<other variant>)",
+                        Err(_) => "Err(<recv error>)",
+                    }
+                ),
+            }
+            assert!(rx.try_recv().is_err());
+        }
+
+        #[tokio::test]
+        async fn sessions_changed_translates_to_app_event() {
+            let (client, mut rx) = make_client();
+            let ext = crate::session_registry::build_sessions_changed_notification();
+
+            client.ext_notification(ext).await.unwrap();
+
+            match rx.try_recv() {
+                Ok(AppEvent::SessionsChanged) => {}
+                _ => panic!("expected SessionsChanged"),
+            }
+            assert!(rx.try_recv().is_err());
+        }
+
+        #[tokio::test]
+        async fn unknown_namespace_is_silently_dropped() {
+            let (client, mut rx) = make_client();
+            let raw = serde_json::value::RawValue::from_string("{}".into()).unwrap();
+            let ext = acp::schema::v1::ExtNotification::new(
+                Arc::<str>::from("some.other.vendor/event"),
+                Arc::from(raw),
+            );
+
+            client.ext_notification(ext).await.unwrap();
+
+            assert!(
+                rx.try_recv().is_err(),
+                "unknown notification must not emit any AppEvent"
+            );
+        }
+
+        #[tokio::test]
+        async fn malformed_intellterm_params_are_silently_dropped() {
+            let (client, mut rx) = make_client();
+            let raw = serde_json::value::RawValue::from_string(r#"{"not_session_id":"x"}"#.into())
+                .unwrap();
+            let ext = acp::schema::v1::ExtNotification::new(
+                Arc::<str>::from(INTELLTERM_METHOD_SESSION_REMOVED),
+                Arc::from(raw),
+            );
+
+            // Must NOT return Err — that would close the ACP connection.
+            client.ext_notification(ext).await.unwrap();
+
+            assert!(
+                rx.try_recv().is_err(),
+                "malformed notification must not emit any AppEvent"
+            );
+        }
+    }
+}

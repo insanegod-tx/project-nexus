@@ -1,0 +1,135 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
+import "EnumEntry.idl";
+
+#include "ViewModelHelpers.idl.h"
+
+namespace Microsoft.Terminal.Settings.Editor
+{
+    runtimeclass AgentEntry
+    {
+        AgentEntry(String id, String displayName, Boolean isInstalled);
+        String Id { get; };
+        String DisplayName { get; };
+        String DisplayLabel { get; };
+        Boolean IsInstalled { get; };
+        Boolean IsAddNew { get; };
+        Windows.UI.Xaml.Visibility RemoveButtonVisibility { get; };
+        void Remove();
+        String CustomCommand { get; };
+    }
+
+    runtimeclass AcpModelEntry
+    {
+        AcpModelEntry(String id, String displayName, String description);
+        String Id { get; };
+        String DisplayName { get; };
+        String Description { get; };
+    }
+
+    runtimeclass CustomModelProviderEntry : Windows.UI.Xaml.Data.INotifyPropertyChanged
+    {
+        String Id { get; };
+        String BaseUrl { get; };
+        String ModelsDisplayText { get; };
+        Boolean IsApiKeyMissing { get; };
+        String RemovalErrorMessage { get; };
+        Boolean HasRemovalError { get; };
+        void Remove();
+    }
+
+    runtimeclass AIAgentsViewModel : Windows.UI.Xaml.Data.INotifyPropertyChanged
+    {
+        AIAgentsViewModel(Microsoft.Terminal.Settings.Model.GlobalAppSettings globalSettings);
+
+        Windows.Foundation.Collections.IObservableVector<AgentEntry> AcpAgentList { get; };
+        Windows.Foundation.Collections.IObservableVector<AgentEntry> DelegateAgentList { get; };
+        AgentEntry CurrentAcpAgent;
+        AgentEntry CurrentDelegateAgent;
+
+        // Custom agent preview (read-only, shown on page load)
+        Boolean IsCustomAcpAgentSelected { get; };
+        String CustomAcpCommandPreview { get; };
+        void EditCustomAcpAgent();
+        Boolean IsCustomDelegateAgentSelected { get; };
+        String CustomDelegateCommandPreview { get; };
+        void EditCustomDelegateAgent();
+
+        // "Add New" inline editing state
+        Boolean IsAddingCustomAcpAgent { get; };
+        Boolean IsAddingCustomDelegateAgent { get; };
+        String CustomAcpCommand;
+        String CustomDelegateCommand;
+        void SaveCustomAcpAgent();
+        void SaveCustomDelegateAgent();
+        void CancelCustomAcpAgent();
+        void CancelCustomDelegateAgent();
+
+        Boolean ShowAcpModel { get; };
+        // List of models the connected agent advertised at session start
+        // (via the ACP `models` field on NewSessionResponse). Empty when the
+        // agent pane has not connected yet, or when the agent doesn't
+        // expose a model list — XAML falls back to the free-form TextBox
+        // in that case so custom agents remain usable.
+        Windows.Foundation.Collections.IObservableVector<AcpModelEntry> AcpModelList { get; };
+        Boolean HasAcpModelList { get; };
+        // Convenience for XAML: true when the dropdown is empty so the
+        // free-form TextBox should take its place. Avoids needing a
+        // bool-to-bool converter resource in the page.
+        Boolean ShowAcpModelTextBox { get; };
+        // ComboBox SelectedItem binding target. Native models are stored in
+        // AcpModel; shared provider models are stored independently so they
+        // survive agent switches.
+        AcpModelEntry CurrentAcpModelEntry;
+        PERMANENT_OBSERVABLE_PROJECTED_SETTING(String, AcpModel);
+        Windows.Foundation.Collections.IObservableVector<CustomModelProviderEntry> CustomModelProviders { get; };
+        Boolean ShowCustomModelProvidersExpander { get; };
+        Boolean IsCustomModelProvidersExpanded;
+        Boolean IsAddingCustomModelProvider { get; };
+        String NewCustomModelProviderBaseUrl;
+        String NewCustomModelId;
+        String NewCustomModelProviderApiKey;
+        Boolean CanSaveCustomModelProvider { get; };
+        String CustomModelProviderUnsupportedMessage { get; };
+        void AddCustomModelProvider();
+        void SaveCustomModelProvider();
+        void CancelCustomModelProvider();
+        Boolean ShowDelegateModel { get; };
+        PERMANENT_OBSERVABLE_PROJECTED_SETTING(String, DelegateModel);
+        IInspectable CurrentAutoErrorHandling;
+        Windows.Foundation.Collections.IObservableVector<EnumEntry> AutoErrorHandlingList { get; };
+        PERMANENT_OBSERVABLE_PROJECTED_SETTING(Boolean, AgentSessionManagementEnabled);
+        PERMANENT_OBSERVABLE_PROJECTED_SETTING(Boolean, ShowTokenUsageAndCost);
+        Boolean CanConfigureAgentSessionManagement { get; };
+
+        // Global "Yolo mode" — requests each supported provider's advertised
+        // native ACP session mode. WTA never selects a permission option;
+        // providers without a reviewed native mode continue prompting.
+        // Getter/setter route through the shared SettingsModel availability
+        // contract so unavailable rows read Off, reject writes, and hide.
+        Boolean AgentPaneYoloMode;
+        Boolean HasAgentPaneYoloMode { get; };
+
+        // GPO policy lock indicators.
+        // IsAgentPolicyLocked: AllowedAgents policy is active — agent
+        //   dropdown options are filtered, but the control stays enabled.
+        // IsCustomAgentPolicyLocked: AllowCustomAgents is disabled.
+        // IsAutoErrorHandlingPolicyRestricted: policy removes the send-to-agent option.
+        // IsAgentSessionHooksPolicyLocked: the corresponding control is disabled.
+        Boolean IsAgentPolicyLocked { get; };
+        Boolean IsCustomAgentPolicyLocked { get; };
+        Boolean IsAutoErrorHandlingPolicyRestricted { get; };
+        Boolean IsAgentSessionHooksPolicyLocked { get; };
+        Boolean IsYoloModePolicyLocked { get; };
+
+        event Windows.Foundation.TypedEventHandler<AIAgentsViewModel, Microsoft.Terminal.Settings.Model.ShellIntegrationTarget> InitShellIntegrationRequested;
+
+        IInspectable CurrentAgentPanePosition;
+        Windows.Foundation.Collections.IObservableVector<EnumEntry> AgentPanePositionList { get; };
+
+        Boolean ShowGeminiYoloInfo { get; };
+        Boolean CanEnableAgentPaneYoloMode { get; };
+        Windows.UI.Xaml.Visibility AgentPaneYoloModeVisibility { get; };
+    }
+}

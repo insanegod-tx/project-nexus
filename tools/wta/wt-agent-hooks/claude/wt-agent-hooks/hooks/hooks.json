@@ -1,0 +1,64 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": ".*",
+        "hooks": [{
+          "type": "command",
+          "command": "command -v wtcli.exe >/dev/null 2>&1 && wtcli.exe agent-hook --cli-source claude --event agent.session.start; exit 0",
+          "shell": "bash"
+        }]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "matcher": ".*",
+        "hooks": [{
+          "type": "command",
+          "command": "command -v wtcli.exe >/dev/null 2>&1 && wtcli.exe agent-hook --cli-source claude --event agent.session.end; exit 0",
+          "shell": "bash"
+        }]
+      }
+    ],
+    "Notification": [
+      {
+        "matcher": ".*",
+        "hooks": [{
+          "type": "command",
+          "command": "command -v wtcli.exe >/dev/null 2>&1 && wtcli.exe agent-hook --cli-source claude --event agent.notification; exit 0",
+          "shell": "bash"
+        }]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "matcher": ".*",
+        "hooks": [{
+          "type": "command",
+          "command": "command -v wtcli.exe >/dev/null 2>&1 && wtcli.exe agent-hook --cli-source claude --event agent.prompt.submit; exit 0",
+          "shell": "bash"
+        }]
+      }
+    ],
+    "StopFailure": [
+      {
+        "matcher": ".*",
+        "hooks": [{
+          "type": "command",
+          "command": "command -v wtcli.exe >/dev/null 2>&1 && wtcli.exe agent-hook --cli-source claude --event agent.error; exit 0",
+          "shell": "bash"
+        }]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": ".*",
+        "hooks": [{
+          "type": "command",
+          "command": "command -v wtcli.exe >/dev/null 2>&1 && wtcli.exe agent-hook --cli-source claude --event agent.stop; exit 0",
+          "shell": "bash"
+        }]
+      }
+    ]
+  }
+}

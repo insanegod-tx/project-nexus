@@ -1,0 +1,63 @@
+# wtcli Command Reference
+
+`wtcli` is the CLI client for the Windows Terminal Protocol. It looks up the
+running Terminal via the `WT_COM_CLSID` environment variable, calls
+`CoCreateInstance(CLSCTX_LOCAL_SERVER)` to obtain `ITerminalProtocol`, and
+exposes a tmux-style command surface over its IDL methods.
+
+`agent-hook` and `send-event` with an `agent.` topic instead use `GetActiveObject`
+with the same fixed `WT_COM_CLSID`, then call the existing factory's
+`CreateInstance`. These notifications never activate Terminal or retry through
+`CoCreateInstance` if it is stopped or exits during the call. Native hooks remain
+silent and exit successfully when disconnected; `send-event` reports the
+connection failure, which cached hook wrappers already suppress. External
+`agent.*` publishers still need only `WT_COM_CLSID`, but Terminal must be running.
+Other commands and non-agent `send-event` topics retain normal COM activation.
+
+- Source: `src/tools/wtcli/main.cpp`
+- Classic COM IDL: `src/host/proxy/ITerminalProtocol.idl`
+- Primary in-tree caller: `tools/wta/src/shell/wt_channel/cli_channel.rs` (and
+  `tools/wta/src/app.rs` for `publish`).
+
+## Global flags
+
+| Flag | Effect |
+|------|--------|
+| `--json` | Emit machine-readable JSON. Required for any caller that parses output. |
+
+## Commands
+
+The "Used in repo" column reflects whether some other component in this
+repository actually shells out to that subcommand today (not whether the
+subcommand is reachable). External callers (third-party agents, ad-hoc
+scripts) are not counted.
+
+| Command | Alias | What it does | Example | Used in repo |
+|---------|-------|--------------|---------|--------------|
+| `list-windows` | `lsw` | List all Terminal windows. | `wtcli --json list-windows` | ✅ `cli_channel.rs` (`list_windows`) |
+| `list-tabs` | `lst` | List tabs in a window. `-w` defaults to the first window. | `wtcli --json list-tabs -w 1` | ✅ `cli_channel.rs` (`list_tabs`) |
+| `list-panes` | `lsp` | List panes in a tab. `-t`/`-w` default to the first tab of the first window. | `wtcli --json list-panes -t 2` | ✅ `cli_channel.rs` (`list_panes`) |
+| `active-pane` | — | Return metadata for the currently focused pane. Used by other subcommands as the default `-t` target. | `wtcli --json active-pane` | ✅ `cli_channel.rs` (`get_active_pane`) |
+| `capture-pane` | `capturep` | Read pane scrollback as text. `-l` caps line count. `--last-prompt` returns only the most recent completed shell prompt (requires OSC 133 shell integration). | `wtcli --json capture-pane -t 3 --last-prompt` | ✅ `cli_channel.rs` (`read_pane_output`) |
+| `pane-status` | — | Report pane process state: `pid`, `state` (`running`/`exited`), and `exit_code` when applicable. | `wtcli --json pane-status -t 3` | ✅ `cli_channel.rs` (`get_process_status`) |
+| `new-tab` | `neww` | Create a new tab. `-c` command, `-n` title, `-d` cwd. | `wtcli --json new-tab -c "pwsh" -n "build" -d C:\src` | ✅ `cli_channel.rs` (`create_tab`) |
+| `split-pane` | `splitw` | Split a pane. `-d right\|left\|up\|down\|auto` (default `automatic`). `-H`/`-v` are legacy aliases for `down`/`right`. `-s` is size fraction; `-c` is the command to run. | `wtcli --json split-pane -t 3 -d right -s 0.4 -c "tail -f log"` | ✅ `cli_channel.rs` (`split_pane`) |
+| `kill-pane` | `killp` | Close a pane. | `wtcli kill-pane -t 4` | ✅ `cli_channel.rs` (`close_pane`) |
+| `focus-pane` | `focusp` | Move focus to the given pane. | `wtcli focus-pane -t 3` | ✅ `cli_channel.rs` (`focus_pane`) |
+| `wait-for` | — | Block (poll `pane-status`) until the pane process exits. `--interval` is poll period in ms; `--timeout` is seconds (`0` = forever). | `wtcli wait-for -t 3 --timeout 60` | ❌ Not called. (`wta` exposes its own `wait-for` subcommand at `tools/wta/src/main.rs:209`, but its handler polls by shelling out to `wtcli pane-status` in a Rust loop — it does **not** invoke `wtcli wait-for`.) |
+| `listen` | — | Long-running. Subscribe to `IProtocolServer` and stream every event JSON line to stdout until Ctrl-C. `-t` filters by pane id; `--event` filters by type and supports a trailing `*` wildcard. Internal callers use `--parent-pid` to terminate the listener if its owner crashes. | `wtcli --json listen --event "agent.*"` | ✅ `cli_channel.rs` (background listener task) |
+| `send-event` | `se` | Publish an event using the `agent_event` envelope: sets `type=event`, `method=agent_event`, fills `params.event` from `-e` and `params.pane_id` from `-p`. Omitting `-p` publishes an empty `pane_id` meaning "source pane unknown" — it is **not** attributed to the focused pane, because guessing a pane corrupts session-to-pane binding, while an unattributed event is routed by `cli_source` instead. Extra params come from the trailing JSON object. | `wtcli send-event -p 3 -e agent.task.completed '{"exit_code":0}'` | ❌ Not called from in-tree code. Kept as the transport for legacy PowerShell hook bundles (guarded by `Feature.LegacyHookBundle.Tests.ps1`) and as the public CLI surface for external agents in `doc/specs/llm-agent-event-integration.md`. |
+| `publish` | — | Low-level escape hatch: forwards raw JSON straight to `IProtocolServer::SendEvent` with no envelope. Pass JSON as a positional argument for compatibility, or use `--stdin` for payloads that may exceed the Windows command-line limit. The two input forms are mutually exclusive. | `Get-Content event.json -Raw \| wtcli publish --stdin` | ✅ `tools/wta/src/wt_protocol_events.rs` |
+| `info` | — | Print `WT_COM_CLSID`, connection status, protocol version, and the server's `GetCapabilities()` method list. | `wtcli --json info` | ✅ `cli_channel.rs` maps `get_capabilities` → `wtcli info` |
+| `test-pipe` | — | Smoke test: connect, run `list-windows` + `get_capabilities`, print results. Diagnostic only. | `wtcli test-pipe` | ❌ Not called. Manual diagnostic. |
+| `set-env` | `setenv` | Print shell-specific export statements for `WT_COM_CLSID` (`-s powershell\|bash\|cmd`). Output is meant to be `eval`'d / `Invoke-Expression`'d by the caller; it does not modify the current process. | `wtcli set-env -s powershell \| Invoke-Expression` | ❌ Not called. Manual recovery for child shells that didn't inherit `WT_COM_CLSID`. |
+
+## Summary
+
+- **Wired into `wta` runtime (13):** `list-windows`, `list-tabs`,
+  `list-panes`, `active-pane`, `capture-pane`, `pane-status`,
+  `new-tab`, `split-pane`, `kill-pane`, `focus-pane`,
+  `listen`, `info`, `publish`.
+- **Defined but not invoked from in-tree code (4):** `wait-for`,
+  `send-event`, `test-pipe`, `set-env`. These remain as public surface for
+  external agents / shell scripts and for manual debugging.

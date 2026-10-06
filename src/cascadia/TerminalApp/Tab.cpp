@@ -1,0 +1,3770 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
+#include "pch.h"
+#include "ColorPickupFlyout.h"
+#include "Tab.h"
+#include "AgentPaneContent.h"
+#include "AgentIconUtils.h"
+#include "SettingsPaneContent.h"
+#include "Tab.g.cpp"
+#include "Utils.h"
+#include "AppLogic.h"
+#include "../../types/inc/ColorFix.hpp"
+#include "../../types/inc/utils.hpp"
+
+using namespace winrt;
+using namespace winrt::Windows::UI::Xaml;
+using namespace winrt::Windows::UI::Core;
+
+using namespace winrt::Microsoft::Terminal::Control;
+using namespace winrt::Microsoft::Terminal::TerminalConnection;
+using namespace winrt::Microsoft::Terminal::Settings::Model;
+using namespace winrt::Microsoft::UI::Xaml::Controls;
+using namespace winrt::Windows::System;
+
+namespace winrt
+{
+    namespace MUX = Microsoft::UI::Xaml;
+    namespace WUX = Windows::UI::Xaml;
+}
+
+#define ASSERT_UI_THREAD() assert(TabViewItem().Dispatcher().HasThreadAccess())
+
+namespace winrt::TerminalApp::implementation
+{
+    Tab::Tab(std::shared_ptr<Pane> rootPane, winrt::hstring stableId)
+    {
+        _rootPane = rootPane;
+        _activePane = nullptr;
+
+        _stableId = stableId.empty() ?
+                        winrt::hstring{ ::Microsoft::Console::Utils::GuidToString(::Microsoft::Console::Utils::CreateGuid()) } :
+                        std::move(stableId);
+
+        _closePaneMenuItem.Visibility(WUX::Visibility::Collapsed);
+
+        auto firstId = _nextPaneId;
+
+        _rootPane->WalkTree([&](const auto& pane) {
+            // update the IDs on each pane
+            if (pane->_IsLeaf())
+            {
+                pane->Id(_nextPaneId);
+                _nextPaneId++;
+            }
+            // Try to find the pane marked active (if it exists)
+            if (pane->_lastActive)
+            {
+                _activePane = pane;
+            }
+        });
+
+        // In case none of the panes were already marked as the focus, just
+        // focus the first one.
+        if (_activePane == nullptr)
+        {
+            const auto firstPane = _rootPane->FindPane(firstId);
+            firstPane->SetActive();
+            _activePane = firstPane;
+        }
+        // If the focused pane is a leaf, add it to the MRU panes
+        if (const auto id = _activePane->Id())
+        {
+            _mruPanes.insert(_mruPanes.begin(), id.value());
+        }
+
+        _Setup();
+    }
+
+    // Method Description:
+    // - Shared setup for the constructors. Assumed that _rootPane has been set.
+    // Arguments:
+    // - <none>
+    // Return Value:
+    // - <none>
+    void Tab::_Setup()
+    {
+        _rootClosedToken = _rootPane->Closed([=](auto&& /*s*/, auto&& /*e*/) {
+            Closed.raise(nullptr, nullptr);
+        });
+
+        Content(_rootPane->GetRootElement());
+
+        _MakeTabViewItem();
+        _CreateContextMenu();
+        _UpdateMenuItemStates();
+
+        _headerControl.TabStatus(_tabStatus);
+        _headerControl.ShowPinnedIcon(false);
+
+        // Add an event handler for the header control to tell us when they want their title to change
+        _headerControl.TitleChangeRequested([weakThis = get_weak()](auto&& title) {
+            if (auto tab{ weakThis.get() })
+            {
+                tab->SetTabText(title);
+            }
+        });
+
+        // GH#9162 - when the header is done renaming, ask for focus to be
+        // tossed back to the control, rather into ourselves.
+        _headerControl.RenameEnded([weakThis = get_weak()](auto&&, auto&&) {
+            if (auto tab{ weakThis.get() })
+            {
+                tab->RequestFocusActiveControl.raise();
+            }
+        });
+
+        _UpdateHeaderControlMaxWidth();
+
+        // Use our header control as the TabViewItem's header
+        TabViewItem().Header(_headerControl);
+    }
+
+    // Method Description:
+    // - Called when the timer for the bell indicator in the tab header fires
+    // - Removes the bell indicator from the tab header
+    // Arguments:
+    // - sender, e: not used
+    void Tab::_BellIndicatorTimerTick(const Windows::Foundation::IInspectable& /*sender*/, const Windows::Foundation::IInspectable& /*e*/)
+    {
+        ShowBellIndicator(false);
+        _bellIndicatorTimer.Stop();
+    }
+
+    // Method Description:
+    // - Initializes a TabViewItem for this Tab instance.
+    // Arguments:
+    // - <none>
+    // Return Value:
+    // - <none>
+    void Tab::_MakeTabViewItem()
+    {
+        TabViewItem(::winrt::MUX::Controls::TabViewItem{});
+
+        // GH#3609 If the tab was tapped, and no one else was around to handle
+        // it, then ask our parent to toss focus into the active control.
+        TabViewItem().Tapped([weakThis{ get_weak() }](auto&&, auto&&) {
+            if (auto tab{ weakThis.get() })
+            {
+                tab->RequestFocusActiveControl.raise();
+            }
+        });
+
+        // BODGY: When the tab is drag/dropped, the TabView gets a
+        // TabDragStarting. However, the way it is implemented[^1], the
+        // TabViewItem needs either an Item or a Content for the event to
+        // include the correct TabViewItem. Otherwise, it will just return the
+        // first TabViewItem in the TabView with the same Content as the dragged
+        // tab (which, if the Content is null, will be the _first_ tab).
+        //
+        // So here, we'll stick an empty border in, just so that every tab has a
+        // Content which is not equal to the others.
+        //
+        // [^1]: microsoft-ui-xaml/blob/92fbfcd55f05c92ac65569f5d284c5b36492091e/dev/TabView/TabView.cpp#L751-L758
+        TabViewItem().Content(winrt::WUX::Controls::Border{});
+
+        TabViewItem().DoubleTapped([weakThis = get_weak()](auto&& /*s*/, const WUX::Input::DoubleTappedRoutedEventArgs& e) {
+            if (auto tab{ weakThis.get() })
+            {
+                if (tab->_tabPointerInteractionRestricted)
+                {
+                    e.Handled(true);
+                    return;
+                }
+                tab->ActivateTabRenamer();
+            }
+        });
+        TabViewItem().RightTapped([weakThis = get_weak()](auto&& /*s*/, const WUX::Input::RightTappedRoutedEventArgs& e) {
+            if (const auto tab{ weakThis.get() };
+                tab && tab->_tabPointerInteractionRestricted)
+            {
+                e.Handled(true);
+            }
+        });
+        TabViewItem().ContextRequested([weakThis = get_weak()](auto&& /*s*/, const WUX::Input::ContextRequestedEventArgs& e) {
+            if (const auto tab{ weakThis.get() };
+                tab && tab->_tabPointerInteractionRestricted)
+            {
+                Windows::Foundation::Point pointerPosition;
+                if (e.TryGetPosition(tab->TabViewItem(), pointerPosition))
+                {
+                    e.Handled(true);
+                }
+                else if (tab->_contextMenuFlyout)
+                {
+                    tab->_contextMenuFlyout.ShowAt(tab->TabViewItem());
+                    e.Handled(true);
+                }
+            }
+        });
+
+        // BODGY: Work around a fail-fast crash in WinUI 2's TabView. When a
+        // game controller (e.g. an XBOX controller's d-pad/stick) moves focus
+        // Up or Down between two TabViewItems, MUX's TabView::OnListViewGettingFocus
+        // runs a GameController-only code path that calls
+        // DispatcherQueue.TryEnqueue, which fails with E_INVALIDARG. That
+        // unhandled error inside a GettingFocus callback makes XAML fail-fast,
+        // and the whole window vanishes. See
+        // microsoft-ui-xaml/blob/840c6cd4ac9d16d9aa99b24f0bd43997fe21bef8/dev/TabView/TabView.cpp#L246
+        //
+        // This GettingFocus handler is on the TabViewItem, which is closer to
+        // the focus source than the TabViewListView that MUX's handler lives
+        // on, so it runs first. Marking the event Handled - and cancelling the
+        // focus move, which is exactly what MUX itself does for the keyboard
+        // case - preempts MUX's broken handler. Keyboard navigation is left
+        // untouched; MUX handles that path safely.
+        TabViewItem().GettingFocus([](auto&&, const winrt::WUX::Input::GettingFocusEventArgs& args) {
+            const auto direction{ args.Direction() };
+            if (direction != winrt::WUX::Input::FocusNavigationDirection::Up &&
+                direction != winrt::WUX::Input::FocusNavigationDirection::Down)
+            {
+                return;
+            }
+            if (args.InputDevice() != winrt::WUX::Input::FocusInputDeviceKind::GameController)
+            {
+                return;
+            }
+            if (args.OldFocusedElement().try_as<winrt::MUX::Controls::TabViewItem>() &&
+                args.NewFocusedElement().try_as<winrt::MUX::Controls::TabViewItem>())
+            {
+                args.Cancel(true);
+                args.Handled(true);
+            }
+        });
+
+        UpdateTitle();
+        _RecalculateAndApplyTabColor();
+    }
+
+    void Tab::_UpdateHeaderControlMaxWidth()
+    {
+        try
+        {
+            // Make sure to try/catch this, because the LocalTests won't be
+            // able to use this helper.
+            const auto settings{ winrt::TerminalApp::implementation::AppLogic::CurrentAppSettings() };
+            if (settings.GlobalSettings().TabWidthMode() == winrt::Microsoft::UI::Xaml::Controls::TabViewWidthMode::SizeToContent)
+            {
+                _headerControl.RenamerMaxWidth(HeaderRenameBoxWidthTitleLength);
+            }
+            else
+            {
+                _headerControl.RenamerMaxWidth(HeaderRenameBoxWidthDefault);
+            }
+        }
+        CATCH_LOG()
+    }
+
+    void Tab::SetDispatch(const winrt::TerminalApp::ShortcutActionDispatch& dispatch)
+    {
+        ASSERT_UI_THREAD();
+
+        _dispatch = dispatch;
+    }
+
+    void Tab::SetActionMap(const Microsoft::Terminal::Settings::Model::IActionMapView& actionMap)
+    {
+        ASSERT_UI_THREAD();
+
+        _actionMap = actionMap;
+        _UpdateSwitchToTabKeyChord();
+    }
+
+    // Method Description:
+    // - Sets the key chord resulting in switch to the current tab.
+    // Updates tool tip if required
+    // Arguments:
+    // - keyChord - string representation of the key chord that switches to the current tab
+    // Return Value:
+    // - <none>
+    void Tab::_UpdateSwitchToTabKeyChord()
+    {
+        const auto id = fmt::format(FMT_COMPILE(L"Terminal.SwitchToTab{}"), _TabViewIndex);
+        auto keyChord{ _actionMap.GetKeyBindingForAction(id) };
+        if (!keyChord && TabViewNumTabs() != 0 && _TabViewIndex == TabViewNumTabs() - 1)
+        {
+            keyChord = _actionMap.GetKeyBindingForAction(L"Terminal.SwitchToLastTab");
+        }
+        const auto keyChordText = keyChord ? KeyChordSerialization::ToString(keyChord) : L"";
+
+        if (_keyChord == keyChordText)
+        {
+            return;
+        }
+
+        _keyChord = keyChordText;
+        Automation::AutomationProperties::SetAcceleratorKey(TabViewItem(), _keyChord);
+        _UpdateToolTip();
+    }
+
+    // Method Description:
+    // - Sets tab tool tip to a concatenation of title and key chord
+    // Arguments:
+    // - <none>
+    // Return Value:
+    // - <none>
+    void Tab::_UpdateToolTip()
+    {
+        const auto title = _CreateToolTipTitle();
+        std::wstring tooltipText{ title };
+
+        auto titleRun = WUX::Documents::Run();
+        titleRun.Text(title);
+
+        auto textBlock = WUX::Controls::TextBlock{};
+        textBlock.TextWrapping(WUX::TextWrapping::Wrap);
+        textBlock.TextAlignment(WUX::TextAlignment::Center);
+        textBlock.Inlines().Append(titleRun);
+
+        if (_isPinned)
+        {
+            auto pinRun = WUX::Documents::Run();
+            pinRun.Text(RS_(L"PinnedTabName"));
+            textBlock.Inlines().Append(WUX::Documents::LineBreak{});
+            textBlock.Inlines().Append(pinRun);
+        }
+
+        if (_isVerticalTabLayout && !_richTabTooltipText.empty())
+        {
+            tooltipText.append(L"\n");
+            tooltipText.append(_richTabTooltipText);
+            auto metadataRun = WUX::Documents::Run();
+            metadataRun.Text(_richTabTooltipText);
+            textBlock.Inlines().Append(WUX::Documents::LineBreak{});
+            textBlock.Inlines().Append(metadataRun);
+        }
+
+        if (!_keyChord.empty())
+        {
+            tooltipText.append(L"\n");
+            tooltipText.append(_keyChord);
+            auto keyChordRun = WUX::Documents::Run();
+            keyChordRun.Text(_keyChord);
+            keyChordRun.FontStyle(winrt::Windows::UI::Text::FontStyle::Italic);
+            textBlock.Inlines().Append(WUX::Documents::LineBreak{});
+            textBlock.Inlines().Append(keyChordRun);
+        }
+
+        WUX::Controls::ToolTip toolTip{};
+        toolTip.Content(textBlock);
+        WUX::Controls::ToolTipService::SetToolTip(TabViewItem(), toolTip);
+        Automation::AutomationProperties::SetHelpText(TabViewItem(), tooltipText);
+        PropertyChanged.raise(*this, WUX::Data::PropertyChangedEventArgs{ L"ToolTip" });
+    }
+
+    // Method Description:
+    // - Returns nullptr if no children of this tab were the last control to be
+    //   focused, the active control of the current pane, or the last active child control
+    //   of the active pane if it is a parent.
+    // - This control might not currently be focused, if the tab itself is not
+    //   currently focused.
+    // Arguments:
+    // - <none>
+    // Return Value:
+    // - nullptr if no children were marked `_lastFocused`, else the TermControl
+    //   that was last focused.
+    TermControl Tab::GetActiveTerminalControl() const
+    {
+        ASSERT_UI_THREAD();
+
+        if (_activePane)
+        {
+            return _activePane->GetLastFocusedTerminalControl();
+        }
+        return nullptr;
+    }
+
+    IPaneContent Tab::GetActiveContent() const
+    {
+        return _activePane ? _activePane->GetContent() : nullptr;
+    }
+
+    // Method Description:
+    // - Called after construction of a Tab object to bind event handlers to its
+    //   associated Pane and TermControl objects
+    // Arguments:
+    // - <none>
+    // Return Value:
+    // - <none>
+    void Tab::Initialize()
+    {
+        ASSERT_UI_THREAD();
+
+        _rootPane->WalkTree([&](const auto& pane) {
+            // Attach event handlers to each new pane
+            _AttachEventHandlersToPane(pane);
+            if (auto content = pane->GetContent())
+            {
+                _AttachEventHandlersToContent(pane->Id().value(), content);
+            }
+        });
+    }
+
+    // Method Description:
+    // - Updates our focus state. If we're gaining focus, make sure to transfer
+    //   focus to the last focused terminal control in our tree of controls.
+    // Arguments:
+    // - focused: our new focus state
+    // Return Value:
+    // - <none>
+    void Tab::Focus(WUX::FocusState focusState)
+    {
+        ASSERT_UI_THREAD();
+
+        _focusState = focusState;
+
+        if (_focused())
+        {
+            if (auto lastFocusedControl{ GetActiveTerminalControl() })
+            {
+                lastFocusedControl.Focus(_focusState);
+
+                // Update our own progress state. This will fire an event signaling
+                // that our taskbar progress changed.
+                _UpdateProgressState();
+            }
+            // When we gain focus, remove the bell indicator if it is active
+            if (_tabStatus.BellIndicator())
+            {
+                ShowBellIndicator(false);
+            }
+        }
+    }
+
+    // Method Description:
+    // - Returns nullopt if no children of this tab were the last control to be
+    //   focused, or the GUID of the profile of the last control to be focused (if
+    //   there was one).
+    // Arguments:
+    // - <none>
+    // Return Value:
+    // - nullopt if no children of this tab were the last control to be
+    //   focused, else the GUID of the profile of the last control to be focused
+    Profile Tab::GetFocusedProfile() const noexcept
+    {
+        ASSERT_UI_THREAD();
+
+        return _activePane->GetFocusedProfile();
+    }
+
+    // Method Description:
+    // - Attempts to update the settings that apply to this tab.
+    // - Panes are handled elsewhere, by somebody who can establish broader knowledge
+    //   of the settings that apply to all tabs.
+    // Return Value:
+    // - <none>
+    void Tab::UpdateSettings(const CascadiaSettings& settings)
+    {
+        ASSERT_UI_THREAD();
+
+        // The tabWidthMode may have changed, update the header control accordingly
+        _UpdateHeaderControlMaxWidth();
+
+        // Update the settings on all our panes.
+        _rootPane->WalkTree([&](const auto& pane) {
+            pane->UpdateSettings(settings);
+            return false;
+        });
+    }
+
+    // Method Description:
+    // - Set the icon on the TabViewItem for this tab.
+    // Arguments:
+    // - iconPath: The new path string to use as the IconPath for our TabViewItem
+    // Return Value:
+    // - <none>
+    void Tab::UpdateIcon(const winrt::hstring& iconPath, const winrt::Microsoft::Terminal::Settings::Model::IconStyle iconStyle)
+    {
+        ASSERT_UI_THREAD();
+
+        // Don't reload our icon and iconStyle hasn't changed.
+        if (iconPath == _lastIconPath && iconStyle == _lastIconStyle)
+        {
+            return;
+        }
+        _lastIconPath = iconPath;
+        _lastIconStyle = iconStyle;
+
+        const auto previousIcon = Icon();
+        TabViewItem().IconSource(iconStyle == IconStyle::Hidden || _iconHidden ?
+                                     IconSource{ nullptr } :
+                                     ::Microsoft::Terminal::UI::AgentIcons::SourceForIconPath(_lastIconPath, iconStyle == IconStyle::Monochrome));
+        Icon(iconStyle == IconStyle::Hidden ? winrt::hstring{} : _lastIconPath);
+        if (Icon() == previousIcon)
+        {
+            PropertyChanged.raise(*this, WUX::Data::PropertyChangedEventArgs{ L"Icon" });
+        }
+    }
+
+    // Method Description:
+    // - Hide or show the tab icon for this tab
+    // - Independent of progress; explicit icon visibility is retained.
+    // Arguments:
+    // - hide: if true, we hide the icon; if false, we show the icon
+    void Tab::HideIcon(const bool hide)
+    {
+        ASSERT_UI_THREAD();
+
+        if (_iconHidden != hide)
+        {
+            if (hide)
+            {
+                TabViewItem().IconSource(IconSource{ nullptr });
+            }
+            else
+            {
+                TabViewItem().IconSource(_lastIconStyle == IconStyle::Hidden ?
+                                             IconSource{ nullptr } :
+                                             ::Microsoft::Terminal::UI::AgentIcons::SourceForIconPath(_lastIconPath, _lastIconStyle == IconStyle::Monochrome));
+            }
+            _iconHidden = hide;
+            PropertyChanged.raise(*this, WUX::Data::PropertyChangedEventArgs{ L"Icon" });
+        }
+    }
+
+    // Method Description:
+    // - Hide or show the bell indicator in the tab header
+    // Arguments:
+    // - show: if true, we show the indicator; if false, we hide the indicator
+    void Tab::ShowBellIndicator(const bool show)
+    {
+        ASSERT_UI_THREAD();
+
+        _tabStatus.BellIndicator(show);
+    }
+
+    // Method Description:
+    // - Activates the timer for the bell indicator in the tab
+    // - Called if a bell raised when the tab already has focus
+    void Tab::ActivateBellIndicatorTimer()
+    {
+        ASSERT_UI_THREAD();
+
+        if (!_bellIndicatorTimer)
+        {
+            _bellIndicatorTimer.Interval(std::chrono::milliseconds(2000));
+            _bellIndicatorTimer.Tick({ get_weak(), &Tab::_BellIndicatorTimerTick });
+        }
+
+        _bellIndicatorTimer.Start();
+    }
+
+    // Method Description:
+    // - Gets the title string of the last focused terminal control in our tree.
+    //   Returns the empty string if there is no such control.
+    // Arguments:
+    // - <none>
+    // Return Value:
+    // - the title string of the last focused terminal control in our tree.
+    winrt::hstring Tab::_GetActiveTitle() const
+    {
+        if (!_runtimeTabText.empty())
+        {
+            return _runtimeTabText;
+        }
+        // When an agent pane has focus, freeze the tab title at its current value
+        // rather than showing the agent process's working directory.
+        if (_activePane->IsAgentPane())
+        {
+            return Title();
+        }
+        if (!_activePane->_IsLeaf())
+        {
+            return RS_(L"MultiplePanes");
+        }
+        const auto activeContent = GetActiveContent();
+        return activeContent ? activeContent.Title() : winrt::hstring{};
+    }
+
+    // Method Description:
+    // - Set the text on the TabViewItem for this tab, and bubbles the new title
+    //   value up to anyone listening for changes to our title. Callers can
+    //   listen for the title change with a PropertyChanged even handler.
+    // Arguments:
+    // - <none>
+    // Return Value:
+    // - <none>
+    void Tab::UpdateTitle()
+    {
+        ASSERT_UI_THREAD();
+
+        const auto activeTitle = _GetActiveTitle();
+        // Bubble our current tab text to anyone who's listening for changes.
+        Title(activeTitle);
+
+        // Update the control to reflect the changed title
+        _headerControl.Title(activeTitle);
+        _UpdateRichTabPresentation();
+    }
+
+    void Tab::SetRichTabPresentation(
+        const std::optional<::Microsoft::Terminal::RichTab::Provider::Presentation>& presentation)
+    {
+        ASSERT_UI_THREAD();
+        if (_richTabPresentation != presentation)
+        {
+            _richTabPresentation = presentation;
+            _UpdateRichTabPresentation();
+        }
+    }
+
+    void Tab::_UpdateRichTabPresentation()
+    {
+        std::wstring text;
+        std::wstring tooltip;
+        std::wstring accessibilityText;
+        if constexpr (Feature_RichTabProviders::IsEnabled())
+        {
+            if (_richTabPresentation)
+            {
+                text = _richTabPresentation->text;
+                tooltip = _richTabPresentation->tooltip;
+                accessibilityText = _richTabPresentation->accessibilityText;
+            }
+        }
+
+        const auto hasVisibleMetadata = !text.empty();
+        _richTabTooltipText = tooltip;
+        _richTabAccessibilityText = accessibilityText;
+        _headerControl.MetadataText(text);
+        _headerControl.MetadataAutomationName(_richTabAccessibilityText);
+        _headerControl.IsMetadataVisible(_isVerticalTabLayout && hasVisibleMetadata);
+
+        _UpdateAutomationName();
+        _UpdateToolTip();
+    }
+
+    void Tab::_UpdateAutomationName()
+    {
+        auto name = std::wstring{ Title() };
+        if (_isPinned)
+        {
+            name += L", ";
+            name += RS_(L"PinnedTabName");
+        }
+        if (_isVerticalTabLayout && !_richTabAccessibilityText.empty())
+        {
+            name += L", ";
+            name += _richTabAccessibilityText;
+        }
+        _headerControl.Presentation().AutomationName(name);
+        Automation::AutomationProperties::SetName(TabViewItem(), name);
+    }
+
+    // Method Description:
+    // - Move the viewport of the terminal up or down a number of lines. Negative
+    //      values of `delta` will move the view up, and positive values will move
+    //      the viewport down.
+    // Arguments:
+    // - delta: a number of lines to move the viewport relative to the current viewport.
+    // Return Value:
+    // - <none>
+    void Tab::Scroll(const int delta)
+    {
+        ASSERT_UI_THREAD();
+
+        if (auto control{ GetActiveTerminalControl() })
+        {
+            const auto currentOffset = control.ScrollOffset();
+            control.ScrollViewport(::base::ClampAdd(currentOffset, delta));
+        }
+    }
+
+    // Method Description:
+    // - Serializes the state of this tab as a series of commands that can be
+    //   executed to recreate it.
+    // Arguments:
+    // - <none>
+    // Return Value:
+    // - A vector of commands
+    std::vector<ActionAndArgs> Tab::BuildStartupActions(BuildStartupKind kind) const
+    {
+        ASSERT_UI_THREAD();
+
+        // Give initial ids (0 for the child created with this tab,
+        // 1 for the child after the first split.
+        auto state = _rootPane->BuildStartupActions(0, 1, kind);
+
+        {
+            ActionAndArgs newTabAction{};
+            INewContentArgs newContentArgs{ state.firstPane->GetTerminalArgsForPane(kind) };
+
+            // Special case here: if there was one pane (which results in no actions
+            // being generated), and it was a settings pane, then promote that to an
+            // open settings action. The openSettings action itself has additional machinery
+            // to prevent multiple top-level settings tabs.
+            const auto wasSettings = state.args.empty() &&
+                                     (newContentArgs && newContentArgs.Type() == L"settings");
+            if (wasSettings)
+            {
+                newTabAction.Action(ShortcutAction::OpenSettings);
+                newTabAction.Args(OpenSettingsArgs{ SettingsTarget::SettingsUI });
+                return std::vector<ActionAndArgs>{ std::move(newTabAction) };
+            }
+
+            newTabAction.Action(ShortcutAction::NewTab);
+            newTabAction.Args(NewTabArgs{ newContentArgs });
+
+            state.args.emplace(state.args.begin(), std::move(newTabAction));
+        }
+
+        if (_runtimeTabColor)
+        {
+            ActionAndArgs setColorAction{};
+            setColorAction.Action(ShortcutAction::SetTabColor);
+
+            SetTabColorArgs setColorArgs{ _runtimeTabColor.value() };
+            setColorAction.Args(setColorArgs);
+
+            state.args.emplace_back(std::move(setColorAction));
+        }
+
+        if (!_runtimeTabText.empty())
+        {
+            ActionAndArgs renameTabAction{};
+            renameTabAction.Action(ShortcutAction::RenameTab);
+
+            RenameTabArgs renameTabArgs{ _runtimeTabText };
+            renameTabAction.Args(renameTabArgs);
+
+            state.args.emplace_back(std::move(renameTabAction));
+        }
+
+        // If we only have one arg, we only have 1 pane so we don't need any
+        // special focus logic
+        if (state.args.size() > 1 && state.focusedPaneId.has_value())
+        {
+            ActionAndArgs focusPaneAction{};
+            focusPaneAction.Action(ShortcutAction::FocusPane);
+            FocusPaneArgs focusArgs{ state.focusedPaneId.value() };
+            focusPaneAction.Args(focusArgs);
+
+            state.args.emplace_back(std::move(focusPaneAction));
+        }
+
+        if (_zoomedPane)
+        {
+            // we start without any panes zoomed so toggle zoom will enable zoom.
+            ActionAndArgs zoomPaneAction{};
+            zoomPaneAction.Action(ShortcutAction::TogglePaneZoom);
+
+            state.args.emplace_back(std::move(zoomPaneAction));
+        }
+
+        return state.args;
+    }
+
+    // Method Description:
+    // - Split the focused pane in our tree of panes, and place the
+    //   given pane into the tree of panes according to the split
+    // Arguments:
+    // - splitType: The type of split we want to create
+    // - splitSize: The size of the split we want to create
+    // - pane: The new pane to add to the tree of panes; note that this pane
+    //         could itself be a parent pane/the root node of a tree of panes
+    // Return Value:
+    // - a pair of (the Pane that now holds the original content, the new Pane in the tree)
+    std::pair<std::shared_ptr<Pane>, std::shared_ptr<Pane>> Tab::SplitPane(SplitDirection splitType,
+                                                                           const float splitSize,
+                                                                           std::shared_ptr<Pane> pane)
+    {
+        ASSERT_UI_THREAD();
+
+        // Add the new event handlers to the new pane(s)
+        // and update their ids.
+        pane->WalkTree([&](const auto& p) {
+            _AttachEventHandlersToPane(p);
+            if (p->_IsLeaf())
+            {
+                p->Id(_nextPaneId);
+                if (const auto& content{ p->GetContent() })
+                {
+                    _AttachEventHandlersToContent(p->Id().value(), content);
+                }
+                _nextPaneId++;
+            }
+            return false;
+        });
+        pane->EnableBroadcast(_tabStatus.IsInputBroadcastActive());
+
+        // Make sure to take the ID before calling Split() - Split() will clear out the active pane's ID
+        const auto activePaneId = _activePane->Id();
+        // Depending on which direction will be split, the new pane can be
+        // either the first or second child, but this will always return the
+        // original pane first.
+        const auto agentContent = _activePane->GetContent().try_as<winrt::TerminalApp::AgentPaneContent>();
+        const bool completingTransfer = agentContent &&
+                                        winrt::get_self<implementation::AgentPaneContent>(agentContent)->AwaitingTransferredTabContent() &&
+                                        !pane->IsAgentPane();
+        auto [original, newPane] = completingTransfer ?
+                                       _activePane->_Split(splitType, splitSize, pane) :
+                                       _activePane->Split(splitType, splitSize, pane);
+        THROW_HR_IF(E_ILLEGAL_METHOD_CALL, !original || !newPane);
+
+        // After split, Close Pane Menu Item should be visible
+        _closePaneMenuItem.Visibility(WUX::Visibility::Visible);
+
+        // The active pane has an id if it is a leaf
+        if (activePaneId)
+        {
+            original->Id(activePaneId.value());
+        }
+
+        _activePane = original;
+
+        // Add event handlers to the new panes' GotFocus event. When the pane
+        // gains focus, we'll mark it as the new active pane.
+        _AttachEventHandlersToPane(original);
+
+        // Immediately update our tracker of the focused pane now. If we're
+        // splitting panes during startup (from a commandline), then it's
+        // possible that the focus events won't propagate immediately. Updating
+        // the focus here will give the same effect though.
+        _UpdateActivePane(newPane);
+        PaneProjectionChanged.raise();
+
+        return { original, newPane };
+    }
+
+    // Method Description:
+    // - Splits the root pane of this tab, placing the new pane at the edge of
+    //   the entire pane tree. This is used for the agent pane so it appears at
+    //   the bottom/right of ALL panes, not just the active pane.
+    // Arguments:
+    // - splitType: The direction to split (Down, Right, etc.)
+    // - pane: The new pane to add at the root level
+    // - splitSize: the fraction of the split the new pane should occupy
+    // Return Value:
+    // - a pair of (the Pane wrapping the original tree, the new Pane)
+    std::pair<std::shared_ptr<Pane>, std::shared_ptr<Pane>> Tab::SplitPaneAtRoot(SplitDirection splitType,
+                                                                                 std::shared_ptr<Pane> pane,
+                                                                                 const float splitSize)
+    {
+        ASSERT_UI_THREAD();
+
+        // Add the new event handlers to the new pane(s) and update their ids.
+        pane->WalkTree([&](const auto& p) {
+            _AttachEventHandlersToPane(p);
+            if (p->_IsLeaf())
+            {
+                p->Id(_nextPaneId);
+                if (const auto& content{ p->GetContent() })
+                {
+                    _AttachEventHandlersToContent(p->Id().value(), content);
+                }
+                _nextPaneId++;
+            }
+            return false;
+        });
+        pane->EnableBroadcast(_tabStatus.IsInputBroadcastActive());
+
+        // Save the root's pane ID before the split clears it. If the root
+        // was a leaf, we need to transfer the ID to the new wrapper pane so
+        // that content event handlers (keyed by pane ID) continue to work.
+        const auto rootPaneId = _rootPane->Id();
+
+        // AttachPane splits the root pane in-place: the existing tree becomes
+        // _firstChild and the new pane becomes _secondChild. Because _rootPane
+        // is modified in-place, Content() (which points to _rootPane->GetRootElement())
+        // remains valid without any re-parenting.
+        auto originalTree = _rootPane->AttachPane(pane, splitType, splitSize);
+
+        // The split created a new wrapper pane for the original tree. Attach
+        // Tab event handlers so that focus changes are tracked correctly —
+        // without this, clicking the original pane won't update _activePane.
+        _AttachEventHandlersToPane(originalTree);
+        if (originalTree->_IsLeaf() && rootPaneId)
+        {
+            originalTree->Id(rootPaneId.value());
+        }
+
+        // Redirect active-pane tracking back into the original tree.
+        // AttachPane mutates _rootPane in place: when the old root was a
+        // single leaf, _activePane pointed at that Pane object, which is
+        // now a non-leaf parent — causing Tab::_GetActiveTitle() to return
+        // "Multiple panes". Note: we deliberately do NOT restore XAML
+        // focus here. Callers that hide the new pane (HidePane) will
+        // re-parent the visible subtree, wiping any focus we set. Focus
+        // restoration is the caller's responsibility and must happen after
+        // HidePane.
+        if (_activePane && !_activePane->_IsLeaf())
+        {
+            auto originalLeaf = originalTree->_IsLeaf() ? originalTree : originalTree->GetActivePane();
+            if (originalLeaf && originalLeaf->_IsLeaf())
+            {
+                _UpdateActivePane(originalLeaf);
+            }
+        }
+
+        // After split, Close Pane Menu Item should be visible
+        _closePaneMenuItem.Visibility(WUX::Visibility::Visible);
+        PaneProjectionChanged.raise();
+
+        return { originalTree, pane };
+    }
+
+    // Method Description:
+    // - Removes the currently active pane from this tab. If that was the only
+    //   remaining pane, then the entire tab is closed as well.
+    // Arguments:
+    // - <none>
+    // Return Value:
+    // - The removed pane, if the remove succeeded.
+    std::shared_ptr<Pane> Tab::DetachPane()
+    {
+        return DetachPane(_activePane);
+    }
+
+    std::shared_ptr<Pane> Tab::DetachPane(const std::shared_ptr<Pane>& selectedPane)
+    {
+        ASSERT_UI_THREAD();
+
+        // if we only have one pane, or the focused pane is the root, remove it
+        // entirely and close this tab
+        if (_rootPane == selectedPane)
+        {
+            return DetachRoot();
+        }
+
+        // Attempt to remove the active pane from the tree
+        if (const auto pane = _rootPane->DetachPane(selectedPane))
+        {
+            // Detaching the last terminal can close the remaining agent-only
+            // subtree, leaving no active pane while Closed removes the tab.
+            if (const auto activePane = _rootPane->GetActivePane())
+            {
+                _UpdateActivePane(activePane);
+            }
+
+            PaneProjectionChanged.raise();
+            return pane;
+        }
+
+        return nullptr;
+    }
+
+    // Method Description:
+    // - Closes this tab and returns the root pane to be used elsewhere.
+    // Arguments:
+    // - <none>
+    // Return Value:
+    // - The root pane.
+    std::shared_ptr<Pane> Tab::DetachRoot()
+    {
+        auto pane = TakeRootForTransfer();
+        Closed.raise(nullptr, nullptr);
+        return pane;
+    }
+
+    std::shared_ptr<Pane> Tab::TakeRootForTransfer()
+    {
+        ASSERT_UI_THREAD();
+
+        // remove the closed event handler since we are closing the tab
+        // manually.
+        _rootPane->Closed(_rootClosedToken);
+        auto p = _rootPane;
+        p->WalkTree([](const auto& pane) {
+            pane->Detached.raise(pane);
+        });
+
+        // Clean up references and close the tab
+        _rootPane = nullptr;
+        _activePane = nullptr;
+        Content(nullptr);
+        return p;
+    }
+
+    // Method Description:
+    // - Add an arbitrary pane to this tab. This will be added as a split on the
+    //   currently active pane.
+    // Arguments:
+    // - pane: The pane to add.
+    // Return Value:
+    // - <none>
+    void Tab::AttachPane(std::shared_ptr<Pane> pane)
+    {
+        ASSERT_UI_THREAD();
+
+        // Add the new event handlers to the new pane(s)
+        // and update their ids.
+        pane->WalkTree([&](const auto& p) {
+            _AttachEventHandlersToPane(p);
+            if (p->_IsLeaf())
+            {
+                p->Id(_nextPaneId);
+
+                if (const auto& content{ p->GetContent() })
+                {
+                    _AttachEventHandlersToContent(p->Id().value(), content);
+                }
+                _nextPaneId++;
+            }
+        });
+        pane->EnableBroadcast(_tabStatus.IsInputBroadcastActive());
+        // pass the old id to the new child
+        const auto previousId = _activePane->Id();
+
+        // Add the new pane as an automatic split on the active pane.
+        auto first = _activePane->AttachPane(pane, SplitDirection::Automatic);
+
+        // This will be true if the original _activePane is a leaf pane.
+        // If it is a parent pane then we don't want to set an ID on it.
+        if (previousId)
+        {
+            first->Id(previousId.value());
+        }
+
+        // Update with event handlers on the new child.
+        _activePane = first;
+        _AttachEventHandlersToPane(first);
+
+        // Make sure that we have the right pane set as the active pane
+        if (const auto focus = pane->GetActivePane())
+        {
+            _UpdateActivePane(focus);
+        }
+        PaneProjectionChanged.raise();
+    }
+
+    // Method Description:
+    // - Attaches the given color picker to ourselves
+    // - Typically will be called after we have sent a request for the color picker
+    // Arguments:
+    // - colorPicker: The color picker that we should attach to ourselves
+    // Return Value:
+    // - <none>
+    void Tab::AttachColorPicker(TerminalApp::ColorPickupFlyout& colorPicker)
+    {
+        ASSERT_UI_THREAD();
+
+        const auto header = _HeaderControl(true);
+        if (!header)
+        {
+            LOG_HR(E_UNEXPECTED);
+            return;
+        }
+        auto weakThis{ get_weak() };
+
+        _tabColorPickup = colorPicker;
+
+        _colorSelectedToken = _tabColorPickup.ColorSelected([weakThis](auto newTabColor) {
+            if (auto tab{ weakThis.get() })
+            {
+                tab->SetRuntimeTabColor(newTabColor);
+            }
+        });
+
+        _colorClearedToken = _tabColorPickup.ColorCleared([weakThis]() {
+            if (auto tab{ weakThis.get() })
+            {
+                tab->ResetRuntimeTabColor();
+            }
+        });
+
+        _pickerClosedToken = _tabColorPickup.Closed([weakThis](auto&&, auto&&) {
+            if (auto tab{ weakThis.get() })
+            {
+                tab->_tabColorPickup.ColorSelected(tab->_colorSelectedToken);
+                tab->_tabColorPickup.ColorCleared(tab->_colorClearedToken);
+                tab->_tabColorPickup.Closed(tab->_pickerClosedToken);
+                tab->_tabColorPickup = nullptr;
+            }
+        });
+
+        _tabColorPickup.ShowAt(header);
+    }
+
+    // Method Description:
+    // - Find the currently active pane, and then switch the split direction of
+    //   its parent. E.g. switch from Horizontal to Vertical.
+    // Return Value:
+    // - <none>
+    void Tab::ToggleSplitOrientation()
+    {
+        ASSERT_UI_THREAD();
+
+        _rootPane->ToggleSplitOrientation();
+    }
+
+    // Method Description:
+    // - See Pane::CalcSnappedDimension
+    float Tab::CalcSnappedDimension(const bool widthOrHeight, const float dimension) const
+    {
+        ASSERT_UI_THREAD();
+
+        return _rootPane->CalcSnappedDimension(widthOrHeight, dimension);
+    }
+
+    // Method Description:
+    // - Attempt to move a separator between panes, as to resize each child on
+    //   either size of the separator. See Pane::ResizePane for details.
+    // Arguments:
+    // - direction: The direction to move the separator in.
+    // Return Value:
+    // - whether a pane was resized
+    bool Tab::ResizePane(const ResizeDirection& direction)
+    {
+        ASSERT_UI_THREAD();
+
+        // NOTE: This _must_ be called on the root pane, so that it can propagate
+        // throughout the entire tree.
+        return _rootPane->ResizePane(direction);
+    }
+
+    // Method Description:
+    // - Attempt to move focus between panes, as to focus the child on
+    //   the other side of the separator. See Pane::NavigateFocus for details.
+    // Arguments:
+    // - direction: The direction to move the focus in.
+    // Return Value:
+    // - Whether changing the focus succeeded. This allows a keychord to propagate
+    //   to the terminal when no other panes are present (GH#6219)
+    bool Tab::NavigateFocus(const FocusDirection& direction)
+    {
+        ASSERT_UI_THREAD();
+
+        // NOTE: This _must_ be called on the root pane, so that it can propagate
+        // throughout the entire tree.
+        if (const auto newFocus = _rootPane->NavigateDirection(_activePane, direction, _mruPanes))
+        {
+            // Mark that we want the active pane to changed
+            _changingActivePane = true;
+            const auto res = _rootPane->FocusPane(newFocus);
+            _changingActivePane = false;
+
+            if (_zoomedPane)
+            {
+                UpdateZoom(newFocus);
+            }
+
+            return res;
+        }
+
+        return false;
+    }
+
+    // Method Description:
+    // - Attempts to swap the location of the focused pane with another pane
+    //   according to direction. When there are multiple adjacent panes it will
+    //   select the first one (top-left-most).
+    // Arguments:
+    // - direction: The direction to move the pane in.
+    // Return Value:
+    // - true if two panes were swapped.
+    bool Tab::SwapPane(const FocusDirection& direction)
+    {
+        ASSERT_UI_THREAD();
+
+        // You cannot swap panes with the parent/child pane because of the
+        // circular reference.
+        if (direction == FocusDirection::Parent || direction == FocusDirection::Child)
+        {
+            return false;
+        }
+        // NOTE: This _must_ be called on the root pane, so that it can propagate
+        // throughout the entire tree.
+        if (auto neighbor = _rootPane->NavigateDirection(_activePane, direction, _mruPanes))
+        {
+            // SwapPanes will refocus the terminal to make sure that it has focus
+            // even after moving.
+            _changingActivePane = true;
+            const auto res = _rootPane->SwapPanes(_activePane, neighbor);
+            _changingActivePane = false;
+            return res;
+        }
+
+        return false;
+    }
+
+    bool Tab::FocusPane(const uint32_t id)
+    {
+        ASSERT_UI_THREAD();
+
+        if (_rootPane == nullptr)
+        {
+            return false;
+        }
+        _changingActivePane = true;
+        const auto res = _rootPane->FocusPane(id);
+        _changingActivePane = false;
+        return res;
+    }
+
+    void Tab::Close()
+    {
+        ASSERT_UI_THREAD();
+
+        Closed.raise(nullptr, nullptr);
+    }
+
+    // Method Description:
+    // - Prepares this tab for being removed from the UI hierarchy by shutting down all active connections.
+    void Tab::Shutdown()
+    {
+        ASSERT_UI_THREAD();
+
+        // NOTE: `TerminalPage::_HandleCloseTabRequested` relies on the content being null after this call.
+        Content(nullptr);
+
+        if (_rootPane)
+        {
+            _rootPane->Shutdown();
+        }
+    }
+
+    // Method Description:
+    // - Closes the currently focused pane in this tab. If it's the last pane in
+    //   this tab, our Closed event will be fired (at a later time) for anyone
+    //   registered as a handler of our close event.
+    // Arguments:
+    // - <none>
+    // Return Value:
+    // - <none>
+    void Tab::ClosePane()
+    {
+        ASSERT_UI_THREAD();
+
+        _activePane->Close();
+    }
+
+    void Tab::SetTabText(winrt::hstring title)
+    {
+        ASSERT_UI_THREAD();
+
+        const auto previousTitle = Title();
+        _runtimeTabText = title;
+        UpdateTitle();
+        if (Title() == previousTitle)
+        {
+            PropertyChanged.raise(*this, WUX::Data::PropertyChangedEventArgs{ L"Title" });
+        }
+    }
+
+    winrt::hstring Tab::GetTabText() const
+    {
+        ASSERT_UI_THREAD();
+
+        return _runtimeTabText;
+    }
+
+    void Tab::ResetTabText()
+    {
+        ASSERT_UI_THREAD();
+
+        const auto previousTitle = Title();
+        _runtimeTabText = L"";
+        UpdateTitle();
+        if (Title() == previousTitle)
+        {
+            PropertyChanged.raise(*this, WUX::Data::PropertyChangedEventArgs{ L"Title" });
+        }
+    }
+
+    // Method Description:
+    // - Show a TextBox in the Header to allow the user to set a string
+    //     to use as an override for the tab's text
+    // Arguments:
+    // - <none>
+    // Return Value:
+    // - <none>
+    void Tab::ActivateTabRenamer()
+    {
+        ASSERT_UI_THREAD();
+
+        if (const auto header = _HeaderControl(true))
+        {
+            header.BeginRename();
+        }
+        else
+        {
+            LOG_HR(E_UNEXPECTED);
+        }
+    }
+
+    void Tab::CancelTabRename()
+    {
+        ASSERT_UI_THREAD();
+        if (const auto header = _HeaderControl())
+        {
+            header.CancelRename();
+        }
+    }
+
+    TerminalApp::TabHeaderControl Tab::_HeaderControl(const bool realize)
+    {
+        return _isVerticalTabLayout ? (_headerResolver ? _headerResolver(realize) : nullptr) : _headerControl;
+    }
+
+    // Method Description:
+    // - Removes any event handlers set by the tab on the given pane's control.
+    //   The pane's ID is the most stable identifier for a given control, because
+    //   the control itself doesn't have a particular ID and its pointer is
+    //   unstable since it is moved when panes split.
+    // Arguments:
+    // - paneId: The ID of the pane that contains the given content.
+    // Return Value:
+    // - <none>
+    void Tab::_DetachEventHandlersFromContent(const uint32_t paneId)
+    {
+        auto it = _contentEvents.find(paneId);
+        if (it != _contentEvents.end())
+        {
+            // revoke the event handlers by resetting the event struct
+            // and remove it from the map
+            _contentEvents.erase(paneId);
+        }
+    }
+
+    // Method Description:
+    // - Register any event handlers that we may need with the given TermControl.
+    //   This should be called on each and every TermControl that we add to the tree
+    //   of Panes in this tab. We'll add events too:
+    //   * notify us when the control's title changed, so we can update our own
+    //     title (if necessary)
+    // Arguments:
+    // - paneId: the ID of the pane that this control belongs to.
+    // - control: the TermControl to add events to.
+    // Return Value:
+    // - <none>
+    void Tab::_AttachEventHandlersToContent(const uint32_t paneId, const TerminalApp::IPaneContent& content)
+    {
+        auto weakThis{ get_weak() };
+        auto dispatcher = DispatcherQueue::GetForCurrentThread();
+        ContentEventTokens events{};
+
+        auto throttledTitleChanged = std::make_shared<ThrottledFunc<>>(
+            dispatcher,
+            til::throttled_func_options{
+                .delay = std::chrono::milliseconds{ 200 },
+                .leading = true,
+                .trailing = true,
+            },
+            [weakThis]() {
+                if (const auto tab = weakThis.get())
+                {
+                    tab->UpdateTitle();
+                    tab->PaneProjectionChanged.raise();
+                }
+            });
+
+        events.TitleChanged = content.TitleChanged(
+            winrt::auto_revoke,
+            [func = std::move(throttledTitleChanged)](auto&&, auto&&) {
+                func->Run();
+            });
+
+        auto throttledTaskbarProgressChanged = std::make_shared<ThrottledFunc<>>(
+            dispatcher,
+            til::throttled_func_options{
+                .delay = std::chrono::milliseconds{ 200 },
+                .trailing = true,
+            },
+            [weakThis]() {
+                if (const auto tab = weakThis.get())
+                {
+                    tab->_UpdateProgressState();
+                    tab->PaneProjectionChanged.raise();
+                }
+            });
+
+        events.TaskbarProgressChanged = content.TaskbarProgressChanged(
+            winrt::auto_revoke,
+            [func = std::move(throttledTaskbarProgressChanged)](auto&&, auto&&) {
+                func->Run();
+            });
+
+        events.TabColorChanged = content.TabColorChanged(
+            winrt::auto_revoke,
+            [dispatcher, weakThis](auto&&, auto&&) -> safe_void_coroutine {
+                const auto weakThisCopy = weakThis;
+                co_await wil::resume_foreground(dispatcher);
+                if (auto tab{ weakThisCopy.get() })
+                {
+                    // The control's tabColor changed, but it is not necessarily the
+                    // active control in this tab. We'll just recalculate the
+                    // current color anyways.
+                    tab->_RecalculateAndApplyTabColor();
+                    tab->_tabStatus.TabColorIndicator(tab->GetTabColor().value_or(Windows::UI::Colors::Transparent()));
+                }
+            });
+
+        events.ConnectionStateChanged = content.ConnectionStateChanged(
+            winrt::auto_revoke,
+            [dispatcher, weakThis](auto&&, auto&&) -> safe_void_coroutine {
+                const auto weakThisCopy = weakThis;
+                co_await wil::resume_foreground(dispatcher);
+                if (auto tab{ weakThisCopy.get() })
+                {
+                    tab->_UpdateConnectionClosedState();
+                }
+            });
+
+        events.ReadOnlyChanged = content.ReadOnlyChanged(
+            winrt::auto_revoke,
+            [dispatcher, weakThis](auto&&, auto&&) -> safe_void_coroutine {
+                const auto weakThisCopy = weakThis;
+                co_await wil::resume_foreground(dispatcher);
+                if (auto tab{ weakThisCopy.get() })
+                {
+                    tab->_RecalculateAndApplyReadOnly();
+                }
+            });
+
+        events.FocusRequested = content.FocusRequested(
+            winrt::auto_revoke,
+            [dispatcher, weakThis](TerminalApp::IPaneContent sender, auto) -> safe_void_coroutine {
+                const auto weakThisCopy = weakThis;
+                co_await wil::resume_foreground(dispatcher);
+                if (const auto tab{ weakThisCopy.get() })
+                {
+                    if (tab->_focused())
+                    {
+                        sender.Focus(FocusState::Pointer);
+                    }
+                }
+            });
+
+        events.BellRequested = content.BellRequested(
+            winrt::auto_revoke,
+            [dispatcher, weakThis](TerminalApp::IPaneContent sender, auto bellArgs) -> safe_void_coroutine {
+                const auto weakThisCopy = weakThis;
+                co_await wil::resume_foreground(dispatcher);
+                if (const auto tab{ weakThisCopy.get() })
+                {
+                    if (bellArgs.FlashTaskbar())
+                    {
+                        // If visual is set, we need to bubble this event all the way to app host to flash the taskbar
+                        // In this part of the chain we bubble it from the hosting tab to the page
+                        tab->TabRaiseVisualBell.raise();
+                    }
+
+                    // Send a desktop toast notification if requested, but only if
+                    // the pane isn't already in the belled state. This prevents
+                    // sending repeated toasts for repeated BEL characters.
+                    if (bellArgs.SendNotification() && !tab->_tabStatus.BellIndicator())
+                    {
+                        tab->TabToastNotificationRequested.raise(tab->Title(), L"", sender);
+                    }
+
+                    // Show the bell indicator in the tab header
+                    tab->ShowBellIndicator(true);
+
+                    // If this tab is focused, activate the bell indicator timer, which will
+                    // remove the bell indicator once it fires
+                    // (otherwise, the indicator is removed when the tab gets focus)
+                    if (tab->_focusState != WUX::FocusState::Unfocused)
+                    {
+                        tab->ActivateBellIndicatorTimer();
+                    }
+                }
+            });
+
+        if (const auto& terminal{ content.try_as<TerminalApp::TerminalPaneContent>() })
+        {
+            events.RestartTerminalRequested = terminal.RestartTerminalRequested(winrt::auto_revoke, { get_weak(), &Tab::_bubbleRestartTerminalRequested });
+        }
+
+        events.NotificationRequested = content.NotificationRequested(
+            winrt::auto_revoke,
+            [dispatcher, weakThis](TerminalApp::IPaneContent sender, auto notifArgs) -> safe_void_coroutine {
+                const auto weakThisCopy = weakThis;
+                co_await wil::resume_foreground(dispatcher);
+                if (const auto tab{ weakThisCopy.get() })
+                {
+                    const auto title = notifArgs.Title().empty() ? tab->Title() : notifArgs.Title();
+                    tab->TabToastNotificationRequested.raise(title, notifArgs.Body(), sender);
+                }
+            });
+
+        if (_tabStatus.IsInputBroadcastActive())
+        {
+            if (const auto& termContent{ content.try_as<TerminalApp::TerminalPaneContent>() })
+            {
+                _addBroadcastHandlers(termContent.GetTermControl(), events);
+            }
+        }
+
+        _contentEvents[paneId] = std::move(events);
+    }
+
+    // Method Description:
+    // - Get the combined taskbar state for the tab. This is the combination of
+    //   all the states of all our panes. Taskbar states are given a priority
+    //   based on the rules in:
+    //   https://docs.microsoft.com/en-us/windows/win32/api/shobjidl_core/nf-shobjidl_core-itaskbarlist3-setprogressstate
+    //   under "How the Taskbar Button Chooses the Progress Indicator for a
+    //   Group"
+    // Arguments:
+    // - <none>
+    // Return Value:
+    // - A TaskbarState object representing the combined taskbar state and
+    //   progress percentage of all our panes.
+    winrt::TerminalApp::TaskbarState Tab::GetCombinedTaskbarState() const
+    {
+        return GetCombinedTaskbarStateWithContentId().CombinedState;
+    }
+
+    Pane::TaskbarStateWithContentId Tab::GetCombinedTaskbarStateWithContentId() const
+    {
+        ASSERT_UI_THREAD();
+
+        std::vector<Pane::TaskbarStateWithContentId> states;
+        if (_rootPane)
+        {
+            _rootPane->CollectTaskbarStates(states);
+        }
+        return states.empty() ?
+                   Pane::TaskbarStateWithContentId{
+                       .CombinedState = winrt::make<winrt::TerminalApp::implementation::TaskbarState>(),
+                       .ContentId = std::nullopt,
+                   } :
+                   *std::min_element(states.begin(), states.end(), [](const auto& lhs, const auto& rhs) {
+                       return TerminalApp::implementation::TaskbarState::ComparePriority(lhs.CombinedState, rhs.CombinedState);
+                   });
+    }
+
+    // Method Description:
+    // - This should be called on the UI thread. If you don't, then it might
+    //   silently do nothing.
+    // - Update our TabStatus to reflect the aggregate progress state of this
+    //   tab's panes. This is the tab-level status used by the horizontal tab
+    //   header and by collapsed vertical groups; per-pane sidebar rows have
+    //   their own projection.
+    // Arguments:
+    // - <none>
+    // Return Value:
+    // - <none>
+    void Tab::_UpdateProgressState()
+    {
+        const auto state{ GetCombinedTaskbarState() };
+
+        const auto taskbarState = state.State();
+        // Mirror the tab's aggregate progress state. Individual pane rows in
+        // the vertical rail project their own raw progress separately.
+        if (taskbarState > 0)
+        {
+            if (taskbarState == 3)
+            {
+                // 3 is the indeterminate state, set the progress ring as such
+                _tabStatus.IsProgressRingIndeterminate(true);
+            }
+            else
+            {
+                // any non-indeterminate state has a value, set the progress ring as such
+                _tabStatus.IsProgressRingIndeterminate(false);
+
+                const auto progressValue = gsl::narrow<uint32_t>(state.Progress());
+                _tabStatus.ProgressValue(progressValue);
+            }
+            _tabStatus.IsProgressRingActive(true);
+        }
+        else
+        {
+            _tabStatus.IsProgressRingActive(false);
+        }
+
+        // fire an event signaling that our taskbar progress changed.
+        TaskbarProgressChanged.raise(nullptr, nullptr);
+    }
+
+    // Method Description:
+    // - Set an indicator on the tab if any pane is in a closed connection state.
+    // - Show/hide the Restart Session context menu entry depending on active pane's state.
+    // Arguments:
+    // - <none>
+    // Return Value:
+    // - <none>
+    void Tab::_UpdateConnectionClosedState()
+    {
+        ASSERT_UI_THREAD();
+
+        if (_rootPane)
+        {
+            const auto hasVisibleClosedConnection = [&](const auto& self,
+                                                        const std::shared_ptr<Pane>& pane,
+                                                        bool ancestorHidden) -> bool {
+                if (!pane)
+                {
+                    return false;
+                }
+
+                const auto hidden = ancestorHidden || pane->IsHidden();
+                if (hidden)
+                {
+                    return false;
+                }
+
+                if (pane->_IsLeaf())
+                {
+                    return pane->IsConnectionClosed();
+                }
+
+                return self(self, pane->_firstChild, hidden) ||
+                       self(self, pane->_secondChild, hidden);
+            };
+
+            _tabStatus.IsConnectionClosed(hasVisibleClosedConnection(hasVisibleClosedConnection, _rootPane, false));
+        }
+    }
+
+    void Tab::_RestartActivePaneConnection()
+    {
+        ActionAndArgs restartConnection{ ShortcutAction::RestartConnection, nullptr };
+        _dispatch.DoAction(*this, restartConnection);
+    }
+
+    // Method Description:
+    // - Mark the given pane as the active pane in this tab. All other panes
+    //   will be marked as inactive. We'll also update our own UI state to
+    //   reflect this newly active pane.
+    // Arguments:
+    // - pane: a Pane to mark as active.
+    // Return Value:
+    // - <none>
+    void Tab::_UpdateActivePane(std::shared_ptr<Pane> pane)
+    {
+        // Remember previous active pane for source-of-agent tracking.
+        auto previousActive = _activePane;
+
+        // Clear the active state of the entire tree, and mark only the pane as active.
+        // NOTE: ClearActive() also clears _isSourceOfAgentPane on all panes.
+        _rootPane->ClearActive();
+        _activePane = pane;
+        _activePane->SetActive();
+
+        // If the newly focused pane is an agent pane and the previously
+        // focused pane was a normal (non-agent) pane, mark it as the target
+        // for agent actions and the corresponding indicator.
+        if (pane->IsAgentPane() && previousActive && !previousActive->IsAgentPane())
+        {
+            previousActive->SetSourceOfAgentPane(true);
+            previousActive->UpdateVisuals();
+        }
+
+        // Recompute the agent-related indicators on every pane in this tab.
+        // Both ClearActive() above and SetSourceOfAgentPane(true) can change
+        // the target, while pane count determines whether target indicators
+        // are needed at all.
+        _UpdateAgentPaneIndicators();
+
+        // Update our own title text to match the newly-active pane.
+        UpdateTitle();
+        _UpdateProgressState();
+        _UpdateConnectionClosedState();
+
+        // We need to move the pane to the top of our mru list
+        // If its already somewhere in the list, remove it first
+        if (const auto paneId = pane->Id())
+        {
+            for (auto i = _mruPanes.begin(); i != _mruPanes.end(); ++i)
+            {
+                if (*i == paneId.value())
+                {
+                    _mruPanes.erase(i);
+                    break;
+                }
+            }
+            _mruPanes.insert(_mruPanes.begin(), paneId.value());
+        }
+
+        if (_rootPane->GetLeafPaneCount() == 1)
+        {
+            _closePaneMenuItem.Visibility(WUX::Visibility::Collapsed);
+        }
+
+        _RecalculateAndApplyReadOnly();
+
+        // Raise our own ActivePaneChanged event.
+        ActivePaneChanged.raise(*this, nullptr);
+
+        // If the new active pane is a terminal, tell other interested panes
+        // what the new active pane is.
+        const auto content{ pane->GetContent() };
+        TermControl termControl{ nullptr };
+        if (const auto termContent{ content.try_as<winrt::TerminalApp::TerminalPaneContent>() })
+        {
+            termControl = termContent.GetTermControl();
+        }
+        else if (const auto agentContent{ content.try_as<winrt::TerminalApp::AgentPaneContent>() })
+        {
+            termControl = agentContent.GetTermControl();
+        }
+        if (termControl)
+        {
+            _rootPane->WalkTree([termControl](const auto& p) {
+                if (const auto& taskPane{ p->GetContent().try_as<SnippetsPaneContent>() })
+                {
+                    taskPane.SetLastActiveControl(termControl);
+                }
+                else if (const auto& taskPane{ p->GetContent().try_as<MarkdownPaneContent>() })
+                {
+                    taskPane.SetLastActiveControl(termControl);
+                }
+            });
+        }
+
+        _UpdateMenuItemStates();
+    }
+
+    // Recompute the agent-related pane indicators. The agent pane is
+    // supplementary UI, so it does not make a single terminal pane a
+    // multi-pane layout by itself. In that case no target chip or focused
+    // pane border is needed: the only possible shell target is unambiguous.
+    void Tab::_UpdateAgentPaneIndicators()
+    {
+        if (!_rootPane)
+        {
+            return;
+        }
+
+        int visibleTerminalPaneCount = 0;
+        bool hasAgentPane = false;
+        _rootPane->WalkTree([&](const auto& pane) {
+            if (pane->IsHidden())
+            {
+                return;
+            }
+            if (pane->IsAgentPane())
+            {
+                hasAgentPane = true;
+            }
+            else if (pane->GetContent().try_as<winrt::TerminalApp::TerminalPaneContent>())
+            {
+                ++visibleTerminalPaneCount;
+            }
+        });
+
+        const bool showAgentTargetIndicators = hasAgentPane && visibleTerminalPaneCount > 1;
+        _rootPane->WalkTree([&](const auto& pane) {
+            const bool isTerminalPane = pane->GetContent().try_as<winrt::TerminalApp::TerminalPaneContent>() != nullptr;
+            pane->_SetFocusBorderEnabled(!pane->IsAgentPane() &&
+                                         (!isTerminalPane || !hasAgentPane || visibleTerminalPaneCount > 1));
+            if (!showAgentTargetIndicators)
+            {
+                pane->SetAgentChipVisible(false);
+            }
+        });
+
+        if (!showAgentTargetIndicators)
+        {
+            return;
+        }
+
+        // When the helper has supplied a session-id override (typically while
+        // a Send recommendation is selected), pin the chip to that pane.
+        // Otherwise it follows the source-of-agent flag.
+        if (_agentChipOverride.has_value())
+        {
+            const auto target = _agentChipOverride.value();
+            _rootPane->WalkTree([&target](const auto& pane) {
+                pane->SetAgentChipVisible(pane->GetSessionId() == target);
+            });
+        }
+        else
+        {
+            _rootPane->WalkTree([](const auto& pane) {
+                pane->SetAgentChipVisible(pane->IsSourceOfAgentPane());
+            });
+        }
+    }
+
+    void Tab::SetAgentChipOverride(std::optional<winrt::guid> sessionId)
+    {
+        // Treat the empty guid as "no override" so a malformed event can't
+        // pin the chip to a nonexistent pane permanently.
+        if (sessionId.has_value() && sessionId.value() == winrt::guid{})
+        {
+            sessionId = std::nullopt;
+        }
+        _agentChipOverride = sessionId;
+        // Always recompute, even when the value didn't change. The helper
+        // re-publishes its current state on startup (and a few other sync
+        // points) so an "equal-but-redundant" event arriving here is the
+        // signal that the C++ side should re-walk the pane tree — for
+        // example to pick up a `IsSourceOfAgentPane()` transition the
+        // indicator refresh in `_UpdateActivePane` missed (legacy
+        // call sites that mutate the flag without going through it).
+        _UpdateAgentPaneIndicators();
+    }
+
+    void Tab::_UpdateMenuItemStates()
+    {
+        _UpdateKeepRunningMenuItem();
+        _UpdatePinMenuItem();
+
+        // Terminal-specific menu items
+        const auto content = _activePane ? _activePane->GetContent() : nullptr;
+        const auto isTerm = content && content.try_as<winrt::TerminalApp::TerminalPaneContent>() != nullptr;
+        _duplicateTabMenuItem.IsEnabled(isTerm);
+        _exportTabMenuItem.IsEnabled(isTerm);
+        _findMenuItem.IsEnabled(isTerm);
+        _restartConnectionMenuItem.IsEnabled(isTerm);
+
+        // Snippets Pane can technically be split
+        _splitTabMenuItem.IsEnabled(isTerm || (content && content.try_as<winrt::TerminalApp::SnippetsPaneContent>() != nullptr));
+    }
+
+    // Method Description:
+    // - Add an event handler to this pane's GotFocus event. When that pane gains
+    //   focus, we'll mark it as the new active pane. We'll also query the title of
+    //   that pane when it's focused to set our own text, and finally, we'll trigger
+    //   our own ActivePaneChanged event.
+    // Arguments:
+    // - <none>
+    // Return Value:
+    // - <none>
+    void Tab::_AttachEventHandlersToPane(std::shared_ptr<Pane> pane)
+    {
+        auto weakThis{ get_weak() };
+        std::weak_ptr<Pane> weakPane{ pane };
+
+        auto gotFocusToken = pane->GotFocus([weakThis](std::shared_ptr<Pane> sender, WUX::FocusState focus) {
+            // Do nothing if the Tab's lifetime is expired or pane isn't new.
+            auto tab{ weakThis.get() };
+
+            if (tab)
+            {
+                if (sender != tab->_activePane)
+                {
+                    auto senderIsChild = tab->_activePane->_HasChild(sender);
+
+                    // Only move focus if we the program moved focus, or the
+                    // user moved with their mouse. This is a problem because a
+                    // pane isn't a control itself, and if we have the parent
+                    // focused we are fine if the terminal control is focused,
+                    // but we don't want to update the active pane.
+                    if (!senderIsChild ||
+                        (focus == WUX::FocusState::Programmatic && tab->_changingActivePane) ||
+                        focus == WUX::FocusState::Pointer)
+                    {
+                        tab->_UpdateActivePane(sender);
+                        tab->_RecalculateAndApplyTabColor();
+                    }
+                }
+                tab->_focusState = WUX::FocusState::Programmatic;
+                // This tab has gained focus, remove the bell indicator if it is active
+                if (tab->_tabStatus.BellIndicator())
+                {
+                    tab->ShowBellIndicator(false);
+                }
+            }
+        });
+
+        auto lostFocusToken = pane->LostFocus([weakThis](std::shared_ptr<Pane> /*sender*/) {
+            // Do nothing if the Tab's lifetime is expired or pane isn't new.
+            auto tab{ weakThis.get() };
+
+            if (tab)
+            {
+                // update this tab's focus state
+                tab->_focusState = WUX::FocusState::Unfocused;
+            }
+        });
+
+        // Add a Closed event handler to the Pane. If the pane closes out from
+        // underneath us, and it's zoomed, we want to be able to make sure to
+        // update our state accordingly to un-zoom that pane. See GH#7252.
+        auto closedToken = pane->Closed([weakThis, weakPane](auto&& /*s*/, auto&& /*e*/) {
+            if (auto tab{ weakThis.get() })
+            {
+                if (tab->_zoomedPane)
+                {
+                    tab->Content(tab->_rootPane->GetRootElement());
+                    tab->ExitZoom();
+                }
+
+                if (auto pane = weakPane.lock())
+                {
+                    // When a parent pane is selected, but one of its children
+                    // close out under it we still need to update title/focus information
+                    // but the GotFocus handler will rightly see that the _activePane
+                    // did not actually change. Triggering
+                    if (pane != tab->_activePane && !tab->_activePane->_IsLeaf())
+                    {
+                        tab->_UpdateActivePane(tab->_activePane);
+                    }
+
+                    for (auto i = tab->_mruPanes.begin(); i != tab->_mruPanes.end(); ++i)
+                    {
+                        if (*i == pane->Id())
+                        {
+                            tab->_mruPanes.erase(i);
+                            break;
+                        }
+                    }
+                }
+
+                // Pane::Closed is raised while the pane tree is still being
+                // collapsed. Recompute on the next UI tick so target-chip and
+                // focus-border decisions see the final tree.
+                if (const auto dispatcher = DispatcherQueue::GetForCurrentThread())
+                {
+                    dispatcher.TryEnqueue(DispatcherQueuePriority::Low, [weakThis]() {
+                        if (const auto tab = weakThis.get())
+                        {
+                            tab->_UpdateAgentPaneIndicators();
+                            tab->PaneProjectionChanged.raise();
+                        }
+                    });
+                }
+            }
+        });
+        const auto structureChangedToken = pane->StructureChanged([weakThis]() {
+            if (const auto tab = weakThis.get())
+            {
+                tab->_UpdateAgentPaneIndicators();
+                tab->PaneProjectionChanged.raise();
+            }
+        });
+
+        // box the event token so that we can give a reference to it in the
+        // event handler.
+        auto detachedToken = std::make_shared<winrt::event_token>();
+        // Add a Detached event handler to the Pane to clean up tab state
+        // and other event handlers when a pane is removed from this tab.
+        *detachedToken = pane->Detached([weakThis, weakPane, gotFocusToken, lostFocusToken, closedToken, structureChangedToken, detachedToken](std::shared_ptr<Pane> /*sender*/) {
+            // Make sure we do this at most once
+            if (auto pane{ weakPane.lock() })
+            {
+                pane->Detached(*detachedToken);
+                pane->GotFocus(gotFocusToken);
+                pane->LostFocus(lostFocusToken);
+                pane->Closed(closedToken);
+                pane->StructureChanged(structureChangedToken);
+
+                if (auto tab{ weakThis.get() })
+                {
+                    tab->_DetachEventHandlersFromContent(pane->Id().value());
+
+                    for (auto i = tab->_mruPanes.begin(); i != tab->_mruPanes.end(); ++i)
+                    {
+                        if (*i == pane->Id())
+                        {
+                            tab->_mruPanes.erase(i);
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    void Tab::_AppendMoveMenuItems(winrt::Windows::UI::Xaml::Controls::MenuFlyout flyout)
+    {
+        auto weakThis{ get_weak() };
+
+        // Move to new window
+        {
+            Controls::FontIcon moveTabToNewWindowTabSymbol;
+            moveTabToNewWindowTabSymbol.FontFamily(Media::FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" });
+            moveTabToNewWindowTabSymbol.Glyph(L"\xE8A7");
+
+            _moveToNewWindowMenuItem.Click([weakThis](auto&&, auto&&) {
+                if (auto tab{ weakThis.get() })
+                {
+                    MoveTabArgs args{ L"new", MoveTabDirection::Forward };
+                    ActionAndArgs actionAndArgs{ ShortcutAction::MoveTab, args };
+                    tab->_dispatch.DoAction(*tab, actionAndArgs);
+                }
+            });
+            _moveToNewWindowMenuItem.Text(RS_(L"MoveTabToNewWindowText"));
+            _moveToNewWindowMenuItem.Icon(moveTabToNewWindowTabSymbol);
+
+            const auto moveTabToNewWindowToolTip = RS_(L"MoveTabToNewWindowToolTip");
+            WUX::Controls::ToolTipService::SetToolTip(_moveToNewWindowMenuItem, box_value(moveTabToNewWindowToolTip));
+            Automation::AutomationProperties::SetHelpText(_moveToNewWindowMenuItem, moveTabToNewWindowToolTip);
+        }
+
+        // Move left
+        {
+            _moveLeftMenuItem.Click([weakThis](auto&&, auto&&) {
+                if (auto tab{ weakThis.get() })
+                {
+                    MoveTabArgs args{ hstring{}, MoveTabDirection::Backward };
+                    ActionAndArgs actionAndArgs{ ShortcutAction::MoveTab, args };
+                    tab->_dispatch.DoAction(*tab, actionAndArgs);
+                }
+            });
+            _moveLeftMenuItem.Text(RS_(L"TabMoveLeft"));
+        }
+
+        // Move right
+        {
+            _moveRightMenuItem.Click([weakThis](auto&&, auto&&) {
+                if (auto tab{ weakThis.get() })
+                {
+                    MoveTabArgs args{ hstring{}, MoveTabDirection::Forward };
+                    ActionAndArgs actionAndArgs{ ShortcutAction::MoveTab, args };
+                    tab->_dispatch.DoAction(*tab, actionAndArgs);
+                }
+            });
+            _moveRightMenuItem.Text(RS_(L"TabMoveRight"));
+        }
+
+        // Create a sub-menu for our extended move tab items.
+        _moveSubMenu.Text(RS_(L"TabMoveSubMenu"));
+        _moveSubMenu.Items().Append(_moveToNewWindowMenuItem);
+        _moveSubMenu.Items().Append(_isVerticalTabLayout ? _moveLeftMenuItem : _moveRightMenuItem);
+        _moveSubMenu.Items().Append(_isVerticalTabLayout ? _moveRightMenuItem : _moveLeftMenuItem);
+        flyout.Items().Append(_moveSubMenu);
+    }
+
+    // Method Description:
+    // - Append the close menu items to the context menu flyout
+    // Arguments:
+    // - flyout - the menu flyout to which the close items must be appended
+    // Return Value:
+    // - the sub-item that we use for all the nested "close" entries. This
+    //   enables subclasses to add their own entries to this menu.
+    winrt::Windows::UI::Xaml::Controls::MenuFlyoutSubItem Tab::_AppendCloseMenuItems(winrt::Windows::UI::Xaml::Controls::MenuFlyout flyout)
+    {
+        auto weakThis{ get_weak() };
+
+        // Close tabs after
+        _closeTabsAfterMenuItem.Click([weakThis](auto&&, auto&&) {
+            if (auto tab{ weakThis.get() })
+            {
+                CloseTabsAfterArgs args{ tab->_TabViewIndex };
+                ActionAndArgs closeTabsAfter{ ShortcutAction::CloseTabsAfter, args };
+                tab->_dispatch.DoAction(*tab, closeTabsAfter);
+            }
+        });
+        _closeTabsAfterMenuItem.Text(RS_(L"TabCloseAfter"));
+        const auto closeTabsAfterToolTip = RS_(L"TabCloseAfterToolTip");
+
+        WUX::Controls::ToolTipService::SetToolTip(_closeTabsAfterMenuItem, box_value(closeTabsAfterToolTip));
+        Automation::AutomationProperties::SetHelpText(_closeTabsAfterMenuItem, closeTabsAfterToolTip);
+
+        // Close other tabs
+        _closeOtherTabsMenuItem.Click([weakThis](auto&&, auto&&) {
+            if (auto tab{ weakThis.get() })
+            {
+                CloseOtherTabsArgs args{ tab->_TabViewIndex };
+                ActionAndArgs closeOtherTabs{ ShortcutAction::CloseOtherTabs, args };
+                tab->_dispatch.DoAction(*tab, closeOtherTabs);
+            }
+        });
+        _closeOtherTabsMenuItem.Text(RS_(L"TabCloseOther"));
+        const auto closeOtherTabsToolTip = RS_(L"TabCloseOtherToolTip");
+
+        WUX::Controls::ToolTipService::SetToolTip(_closeOtherTabsMenuItem, box_value(closeOtherTabsToolTip));
+        Automation::AutomationProperties::SetHelpText(_closeOtherTabsMenuItem, closeOtherTabsToolTip);
+
+        // Close
+        Controls::MenuFlyoutItem closeTabMenuItem;
+        Controls::FontIcon closeSymbol;
+        closeSymbol.FontFamily(Media::FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" });
+        closeSymbol.Glyph(L"\xE711");
+
+        closeTabMenuItem.Click([weakThis](auto&&, auto&&) {
+            if (auto tab{ weakThis.get() })
+            {
+                tab->CloseRequested.raise(nullptr, nullptr);
+            }
+        });
+        closeTabMenuItem.Text(RS_(L"TabClose"));
+        closeTabMenuItem.Icon(closeSymbol);
+        const auto closeTabToolTip = RS_(L"TabCloseToolTip");
+
+        WUX::Controls::ToolTipService::SetToolTip(closeTabMenuItem, box_value(closeTabToolTip));
+        Automation::AutomationProperties::SetHelpText(closeTabMenuItem, closeTabToolTip);
+
+        // Create a sub-menu for our extended close items.
+        Controls::MenuFlyoutSubItem closeSubMenu;
+        closeSubMenu.Text(RS_(L"TabCloseSubMenu"));
+        closeSubMenu.Items().Append(_closeTabsAfterMenuItem);
+        closeSubMenu.Items().Append(_closeOtherTabsMenuItem);
+        flyout.Items().Append(closeSubMenu);
+
+        flyout.Items().Append(closeTabMenuItem);
+
+        return closeSubMenu;
+    }
+
+    void Tab::SetVerticalTabLayout(const bool vertical)
+    {
+        if (_isVerticalTabLayout != vertical)
+        {
+            _isVerticalTabLayout = vertical;
+            _RecalculateAndApplyTabColor();
+        }
+        _UpdateKeepRunningMenuItem();
+        _UpdateRichTabPresentation();
+
+        const auto label = vertical ? RS_(L"TabCloseBelow") : RS_(L"TabCloseAfter");
+        const auto tooltip = vertical ? RS_(L"TabCloseBelowToolTip") : RS_(L"TabCloseAfterToolTip");
+        _closeTabsAfterMenuItem.Text(label);
+        WUX::Controls::ToolTipService::SetToolTip(_closeTabsAfterMenuItem, box_value(tooltip));
+        Automation::AutomationProperties::SetHelpText(_closeTabsAfterMenuItem, tooltip);
+
+        _moveRightMenuItem.Text(vertical ? RS_(L"TabMoveDown") : RS_(L"TabMoveRight"));
+        _moveLeftMenuItem.Text(vertical ? RS_(L"TabMoveUp") : RS_(L"TabMoveLeft"));
+        uint32_t leftIndex{};
+        const auto expectedLeftIndex = vertical ? 1u : 2u;
+        const auto moveItems = _moveSubMenu.Items();
+        if (moveItems.IndexOf(_moveLeftMenuItem, leftIndex) && leftIndex != expectedLeftIndex)
+        {
+            moveItems.RemoveAt(leftIndex);
+            moveItems.InsertAt(expectedLeftIndex, _moveLeftMenuItem);
+        }
+
+        _switchTabLayoutTarget = vertical ? TabLayout::Horizontal : TabLayout::Vertical;
+        const auto switchLabel = vertical ? RS_(L"SwitchToHorizontalTabsText") : RS_(L"SwitchToVerticalTabsText");
+        const auto switchTooltip = vertical ? RS_(L"SwitchToHorizontalTabsToolTip") : RS_(L"SwitchToVerticalTabsToolTip");
+        _switchTabLayoutMenuItem.Text(switchLabel);
+        WUX::Controls::ToolTipService::SetToolTip(_switchTabLayoutMenuItem, box_value(switchTooltip));
+        Automation::AutomationProperties::SetHelpText(_switchTabLayoutMenuItem, switchTooltip);
+    }
+
+    // Method Description:
+    // - Creates a context menu attached to the tab.
+    // Currently contains elements allowing to select or
+    // to close the current tab
+    // Arguments:
+    // - <none>
+    // Return Value:
+    // - <none>
+    void Tab::_CreateContextMenu()
+    {
+        auto weakThis{ get_weak() };
+
+        Controls::FontIcon pinIcon;
+        pinIcon.FontFamily(Media::FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" });
+        pinIcon.Glyph(L"\xE718");
+        _pinMenuItem.Icon(pinIcon);
+        Automation::AutomationProperties::SetAutomationId(_pinMenuItem, L"PinTabMenuItem");
+        _pinMenuItem.Click([weakThis](auto&&, auto&&) {
+            if (const auto tab = weakThis.get())
+            {
+                tab->PinRequested.raise(!tab->IsPinned());
+            }
+        });
+        _UpdatePinMenuItem();
+
+        Controls::FontIcon keepRunningIcon;
+        keepRunningIcon.FontFamily(Media::FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" });
+        _keepRunningMenuItem.Icon(keepRunningIcon);
+        Automation::AutomationProperties::SetAutomationId(_keepRunningMenuItem, L"KeepTabRunningMenuItem");
+        _keepRunningMenuItem.Click([weakThis](auto&&, auto&&) {
+            if (const auto tab = weakThis.get())
+            {
+                tab->KeepRunning(!tab->KeepRunning());
+                if (tab->KeepRunning())
+                {
+                    tab->KeepRunningEnabledByUser.raise();
+                }
+            }
+        });
+
+        // "Change tab color..."
+        Controls::MenuFlyoutItem chooseColorMenuItem;
+        {
+            Controls::FontIcon colorPickSymbol;
+            colorPickSymbol.FontFamily(Media::FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" });
+            colorPickSymbol.Glyph(L"\xE790");
+
+            chooseColorMenuItem.Click({ get_weak(), &Tab::_chooseColorClicked });
+            chooseColorMenuItem.Text(RS_(L"TabColorChoose"));
+            chooseColorMenuItem.Icon(colorPickSymbol);
+
+            const auto chooseColorToolTip = RS_(L"ChooseColorToolTip");
+
+            WUX::Controls::ToolTipService::SetToolTip(chooseColorMenuItem, box_value(chooseColorToolTip));
+            Automation::AutomationProperties::SetHelpText(chooseColorMenuItem, chooseColorToolTip);
+        }
+
+        Controls::MenuFlyoutItem renameTabMenuItem;
+        {
+            // "Rename tab"
+            Controls::FontIcon renameTabSymbol;
+            renameTabSymbol.FontFamily(Media::FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" });
+            renameTabSymbol.Glyph(L"\xE8AC"); // Rename
+
+            renameTabMenuItem.Click({ get_weak(), &Tab::_renameTabClicked });
+            renameTabMenuItem.Text(RS_(L"RenameTabText"));
+            renameTabMenuItem.Icon(renameTabSymbol);
+
+            const auto renameTabToolTip = RS_(L"RenameTabToolTip");
+
+            WUX::Controls::ToolTipService::SetToolTip(renameTabMenuItem, box_value(renameTabToolTip));
+            Automation::AutomationProperties::SetHelpText(renameTabMenuItem, renameTabToolTip);
+        }
+
+        {
+            // "Duplicate tab"
+            Controls::FontIcon duplicateTabSymbol;
+            duplicateTabSymbol.FontFamily(Media::FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" });
+            duplicateTabSymbol.Glyph(L"\xF5ED");
+
+            _duplicateTabMenuItem.Click({ get_weak(), &Tab::_duplicateTabClicked });
+            _duplicateTabMenuItem.Text(RS_(L"DuplicateTabText"));
+            _duplicateTabMenuItem.Icon(duplicateTabSymbol);
+
+            const auto duplicateTabToolTip = RS_(L"DuplicateTabToolTip");
+
+            WUX::Controls::ToolTipService::SetToolTip(_duplicateTabMenuItem, box_value(duplicateTabToolTip));
+            Automation::AutomationProperties::SetHelpText(_duplicateTabMenuItem, duplicateTabToolTip);
+        }
+
+        {
+            // "Split tab"
+            Controls::FontIcon splitTabSymbol;
+            splitTabSymbol.FontFamily(Media::FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" });
+            splitTabSymbol.Glyph(L"\xF246"); // ViewDashboard
+
+            _splitTabMenuItem.Click({ get_weak(), &Tab::_splitTabClicked });
+            _splitTabMenuItem.Text(RS_(L"SplitTabText"));
+            _splitTabMenuItem.Icon(splitTabSymbol);
+
+            const auto splitTabToolTip = RS_(L"SplitTabToolTip");
+
+            WUX::Controls::ToolTipService::SetToolTip(_splitTabMenuItem, box_value(splitTabToolTip));
+            Automation::AutomationProperties::SetHelpText(_splitTabMenuItem, splitTabToolTip);
+        }
+
+        {
+            // "Close pane"
+            _closePaneMenuItem.Click({ get_weak(), &Tab::_closePaneClicked });
+            _closePaneMenuItem.Text(RS_(L"ClosePaneText"));
+
+            const auto closePaneToolTip = RS_(L"ClosePaneToolTip");
+
+            WUX::Controls::ToolTipService::SetToolTip(_closePaneMenuItem, box_value(closePaneToolTip));
+            Automation::AutomationProperties::SetHelpText(_closePaneMenuItem, closePaneToolTip);
+        }
+
+        {
+            // "Export tab"
+            Controls::FontIcon exportTabSymbol;
+            exportTabSymbol.FontFamily(Media::FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" });
+            exportTabSymbol.Glyph(L"\xE74E"); // Save
+
+            _exportTabMenuItem.Click({ get_weak(), &Tab::_exportTextClicked });
+            _exportTabMenuItem.Text(RS_(L"ExportTabText"));
+            _exportTabMenuItem.Icon(exportTabSymbol);
+
+            const auto exportTabToolTip = RS_(L"ExportTabToolTip");
+
+            WUX::Controls::ToolTipService::SetToolTip(_exportTabMenuItem, box_value(exportTabToolTip));
+            Automation::AutomationProperties::SetHelpText(_exportTabMenuItem, exportTabToolTip);
+        }
+
+        {
+            // "Find"
+            Controls::FontIcon findSymbol;
+            findSymbol.FontFamily(Media::FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" });
+            findSymbol.Glyph(L"\xF78B"); // SearchMedium
+
+            _findMenuItem.Click({ get_weak(), &Tab::_findClicked });
+            _findMenuItem.Text(RS_(L"FindText"));
+            _findMenuItem.Icon(findSymbol);
+
+            const auto findToolTip = RS_(L"FindToolTip");
+
+            WUX::Controls::ToolTipService::SetToolTip(_findMenuItem, box_value(findToolTip));
+            Automation::AutomationProperties::SetHelpText(_findMenuItem, findToolTip);
+        }
+
+        {
+            // "Restart session"
+            Controls::FontIcon restartConnectionSymbol;
+            restartConnectionSymbol.FontFamily(Media::FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" });
+            restartConnectionSymbol.Glyph(L"\xE72C");
+
+            _restartConnectionMenuItem.Click([weakThis](auto&&, auto&&) {
+                if (auto tab{ weakThis.get() })
+                {
+                    tab->_RestartActivePaneConnection();
+                }
+            });
+            _restartConnectionMenuItem.Text(RS_(L"RestartConnectionText"));
+            _restartConnectionMenuItem.Icon(restartConnectionSymbol);
+
+            const auto restartConnectionToolTip = RS_(L"RestartConnectionToolTip");
+
+            WUX::Controls::ToolTipService::SetToolTip(_restartConnectionMenuItem, box_value(restartConnectionToolTip));
+            Automation::AutomationProperties::SetHelpText(_restartConnectionMenuItem, restartConnectionToolTip);
+        }
+
+        {
+            _switchTabLayoutMenuItem.Click([weakThis](auto&&, auto&&) {
+                if (const auto tab{ weakThis.get() })
+                {
+                    tab->_pendingTabLayoutChange = tab->_switchTabLayoutTarget;
+                }
+            });
+        }
+
+        // Build the menu
+        Controls::MenuFlyout contextMenuFlyout;
+        Controls::MenuFlyoutSeparator menuSeparator;
+        contextMenuFlyout.Items().Append(_keepRunningMenuItem);
+        contextMenuFlyout.Items().Append(_pinMenuItem);
+        contextMenuFlyout.Items().Append(chooseColorMenuItem);
+        contextMenuFlyout.Items().Append(renameTabMenuItem);
+        contextMenuFlyout.Items().Append(_duplicateTabMenuItem);
+        contextMenuFlyout.Items().Append(_splitTabMenuItem);
+        _AppendMoveMenuItems(contextMenuFlyout);
+        contextMenuFlyout.Items().Append(_exportTabMenuItem);
+        contextMenuFlyout.Items().Append(_findMenuItem);
+        contextMenuFlyout.Items().Append(_restartConnectionMenuItem);
+        contextMenuFlyout.Items().Append(_switchTabLayoutMenuItem);
+        contextMenuFlyout.Items().Append(menuSeparator);
+
+        auto closeSubMenu = _AppendCloseMenuItems(contextMenuFlyout);
+        closeSubMenu.Items().Append(_closePaneMenuItem);
+
+        contextMenuFlyout.Opening([weakThis](auto&&, auto&&) {
+            if (const auto tab = weakThis.get())
+            {
+                tab->_UpdateKeepRunningMenuItem();
+                tab->_UpdatePinMenuItem();
+            }
+        });
+
+        // GH#5750 - When the context menu is dismissed with ESC, toss the focus
+        // back to our control.
+        contextMenuFlyout.Closed([weakThis](auto&&, auto&&) {
+            if (auto tab{ weakThis.get() })
+            {
+                // GH#10112 - if we're opening the tab renamer, don't
+                // immediately toss focus to the control. We don't want to steal
+                // focus from the tab renamer.
+                const auto& terminalControl{ tab->GetActiveTerminalControl() }; // maybe null
+                // If we're
+                // * NOT in a rename
+                // * AND (the content isn't a TermControl, OR the term control doesn't have focus in the search box)
+                const auto header = tab->_HeaderControl();
+                if ((!header || !header.InRename()) &&
+                    (terminalControl == nullptr || !terminalControl.SearchBoxEditInFocus()))
+                {
+                    tab->RequestFocusActiveControl.raise();
+                }
+
+                if (const auto target = std::exchange(tab->_pendingTabLayoutChange, std::nullopt))
+                {
+                    tab->TabViewItem().Dispatcher().RunAsync(CoreDispatcherPriority::Low, [weakThis, target = *target]() {
+                        if (const auto deferredTab{ weakThis.get() })
+                        {
+                            deferredTab->TabLayoutChangeRequested.raise(*deferredTab, target);
+                        }
+                    });
+                }
+            }
+        });
+
+        _contextMenuFlyout = contextMenuFlyout;
+        TabViewItem().ContextFlyout(_contextMenuFlyout);
+    }
+
+    bool Tab::CanKeepRunning() const
+    {
+        return _rootPane && _rootPane->WalkTree([](const auto& pane) -> std::shared_ptr<Pane> {
+            return pane->GetTerminalControl() ? pane : nullptr;
+        });
+    }
+
+    void Tab::KeepRunning(const bool enabled)
+    {
+        ASSERT_UI_THREAD();
+        if (enabled && !_keepRunning)
+        {
+            _keepRunningTelemetryId = winrt::hstring{ ::Microsoft::Console::Utils::GuidToString(::Microsoft::Console::Utils::CreateGuid()) };
+        }
+        _keepRunning = enabled;
+        if (!enabled)
+        {
+            _keepRunningTelemetryId = {};
+        }
+        _tabStatus.IsKeepRunning(enabled);
+        _UpdateKeepRunningMenuItem();
+    }
+
+    void Tab::CopyKeepRunningState(const Tab& source)
+    {
+        ASSERT_UI_THREAD();
+        _keepRunning = source._keepRunning;
+        _keepRunningTelemetryId = source._keepRunningTelemetryId;
+        _tabStatus.IsKeepRunning(_keepRunning);
+        _UpdateKeepRunningMenuItem();
+    }
+
+    void Tab::IsPinned(const bool pinned)
+    {
+        ASSERT_UI_THREAD();
+        _isPinned = pinned;
+        _tabStatus.IsPinned(pinned);
+        _UpdatePinMenuItem();
+        _UpdateAutomationName();
+        _UpdateToolTip();
+    }
+
+    void Tab::_UpdatePinMenuItem()
+    {
+        const auto available = CanKeepRunning();
+        _pinMenuItem.Visibility(available ? WUX::Visibility::Visible : WUX::Visibility::Collapsed);
+        _pinMenuItem.IsEnabled(available && !_tabListPositionOperationsRestricted);
+        const auto label = IsPinned() ? RS_(L"UnpinTabText") : RS_(L"PinTabText");
+        _pinMenuItem.Text(label);
+        const auto tooltip = IsPinned() ? RS_(L"UnpinTabToolTip") : RS_(L"PinTabToolTip");
+        WUX::Controls::ToolTipService::SetToolTip(_pinMenuItem, box_value(tooltip));
+        Automation::AutomationProperties::SetHelpText(_pinMenuItem, tooltip);
+    }
+
+    void Tab::_UpdateKeepRunningMenuItem()
+    {
+        const auto available = _isVerticalTabLayout && CanKeepRunning();
+        _keepRunningMenuItem.Visibility(available ? WUX::Visibility::Visible : WUX::Visibility::Collapsed);
+        _keepRunningMenuItem.IsEnabled(available);
+        const auto enabled = KeepRunning();
+        _keepRunningMenuItem.Text(enabled ? RS_(L"TurnOffKeepTabRunningText") : RS_(L"KeepTabRunningText"));
+        _keepRunningMenuItem.Icon().as<Controls::FontIcon>().Glyph(enabled ? L"\xE711" : L"\xE8EE");
+        const auto tooltip = enabled ? RS_(L"TurnOffKeepTabRunningToolTip") : RS_(L"KeepTabRunningToolTip");
+        WUX::Controls::ToolTipService::SetToolTip(_keepRunningMenuItem, box_value(tooltip));
+        Automation::AutomationProperties::SetHelpText(_keepRunningMenuItem, tooltip);
+    }
+
+    void Tab::SetTabPointerInteractionRestricted(const bool restricted)
+    {
+        ASSERT_UI_THREAD();
+
+        if (_tabPointerInteractionRestricted == restricted)
+        {
+            return;
+        }
+
+        _tabPointerInteractionRestricted = restricted;
+        if (restricted)
+        {
+            if (_contextMenuFlyout)
+            {
+                _contextMenuFlyout.Hide();
+            }
+            TabViewItem().ContextFlyout(nullptr);
+        }
+        else
+        {
+            TabViewItem().ContextFlyout(_contextMenuFlyout);
+        }
+    }
+
+    // Method Description:
+    // - Enable menu items based on tab index and total number of tabs
+    // Arguments:
+    // - <none>
+    // Return Value:
+    // - <none>
+    void Tab::_EnableMenuItems()
+    {
+        const auto tabIndex = TabViewIndex();
+        const auto numOfTabs = TabViewNumTabs();
+
+        // enabled if there are other tabs
+        _closeOtherTabsMenuItem.IsEnabled(!_tabListPositionOperationsRestricted && numOfTabs > 1);
+
+        // enabled if there are other tabs on the right
+        _closeTabsAfterMenuItem.IsEnabled(!_tabListPositionOperationsRestricted && tabIndex < numOfTabs - 1);
+
+        // enabled if not left-most tab
+        _moveLeftMenuItem.IsEnabled(!_tabListPositionOperationsRestricted && tabIndex > (IsPinned() ? 0u : _pinnedTabCount));
+
+        // enabled if not last tab
+        _moveRightMenuItem.IsEnabled(!_tabListPositionOperationsRestricted && tabIndex + 1 < (IsPinned() ? _pinnedTabCount : numOfTabs));
+    }
+
+    void Tab::UpdateTabViewIndex(const uint32_t idx, const uint32_t numTabs, const uint32_t pinnedCount)
+    {
+        ASSERT_UI_THREAD();
+
+        TabViewIndex(idx);
+        TabViewNumTabs(numTabs);
+        _pinnedTabCount = pinnedCount;
+        _EnableMenuItems();
+        _UpdateSwitchToTabKeyChord();
+    }
+
+    // Method Description:
+    // Returns the tab color, if any
+    // Arguments:
+    // - <none>
+    // Return Value:
+    // - The tab's color, if any
+    std::optional<winrt::Windows::UI::Color> Tab::GetTabColor()
+    {
+        ASSERT_UI_THREAD();
+
+        std::optional<winrt::Windows::UI::Color> contentTabColor;
+        if (const auto& content{ GetActiveContent() })
+        {
+            if (const auto color = content.TabColor())
+            {
+                contentTabColor = color.Value();
+            }
+        }
+
+        // A Tab's color will be the result of layering a variety of sources,
+        // from the bottom up:
+        //
+        // Color                |             | Set by
+        // -------------------- | --          | --
+        // Runtime Color        | _optional_  | Color Picker / `setTabColor` action
+        // Content Tab Color    | _optional_  | Profile's `tabColor`, or a color set by VT (whatever the tab's content wants)
+        // Theme Tab Background | _optional_  | `tab.backgroundColor` in the theme (handled in _RecalculateAndApplyTabColor)
+        // Tab Default Color    | **default** | TabView in XAML
+        //
+        // coalesce will get us the first of these values that's
+        // actually set, with nullopt being our sentinel for "use the default
+        // tabview color" (and clear out any colors we've set).
+
+        return til::coalesce(_runtimeTabColor,
+                             contentTabColor,
+                             std::optional<Windows::UI::Color>(std::nullopt));
+    }
+
+    // Method Description:
+    // - Sets the runtime tab background color to the color chosen by the user
+    // - Sets the tab foreground color depending on the luminance of
+    // the background color
+    // Arguments:
+    // - color: the color the user picked for their tab
+    // Return Value:
+    // - <none>
+    void Tab::SetRuntimeTabColor(const winrt::Windows::UI::Color& color)
+    {
+        ASSERT_UI_THREAD();
+
+        _runtimeTabColor.emplace(color);
+        _RecalculateAndApplyTabColor();
+        _tabStatus.TabColorIndicator(color);
+    }
+
+    // Method Description:
+    // - Clear the custom runtime color of the tab, if any color is set. This
+    //   will re-apply whatever the tab's base color should be (either the color
+    //   from the control, the theme, or the default tab color.)
+    // Arguments:
+    // - <none>
+    // Return Value:
+    // - <none>
+    void Tab::ResetRuntimeTabColor()
+    {
+        ASSERT_UI_THREAD();
+
+        _runtimeTabColor.reset();
+        _RecalculateAndApplyTabColor();
+        _tabStatus.TabColorIndicator(GetTabColor().value_or(Windows::UI::Colors::Transparent()));
+    }
+
+    winrt::Windows::UI::Xaml::Media::Brush Tab::_BackgroundBrush()
+    {
+        Media::Brush terminalBrush{ nullptr };
+        if (const auto& c{ GetActiveContent() })
+        {
+            terminalBrush = c.BackgroundBrush();
+        }
+        return terminalBrush;
+    }
+
+    // - Get the total number of leaf panes in this tab. This will be the number
+    //   of actual controls hosted by this tab.
+    // Arguments:
+    // - <none>
+    // Return Value:
+    // - The total number of leaf panes hosted by this tab.
+    int Tab::GetLeafPaneCount() const noexcept
+    {
+        ASSERT_UI_THREAD();
+
+        return _rootPane->GetLeafPaneCount();
+    }
+
+    // Method Description:
+    // - Calculate if a split is possible with the given direction and size.
+    // - Converts Automatic splits to an appropriate direction depending on space.
+    // Arguments:
+    // - splitType: what direction to split.
+    // - splitSize: how big the new split should be.
+    // - availableSpace: how much space there is to work with.
+    // Return value:
+    // - This will return nullopt if a split of the given size/direction was not possible,
+    //   or it will return the split direction with automatic converted to a cardinal direction.
+    std::optional<SplitDirection> Tab::PreCalculateCanSplit(SplitDirection splitType,
+                                                            const float splitSize,
+                                                            winrt::Windows::Foundation::Size availableSpace) const
+    {
+        ASSERT_UI_THREAD();
+
+        return _rootPane->PreCalculateCanSplit(_activePane, splitType, splitSize, availableSpace).value_or(std::nullopt);
+    }
+
+    // Method Description:
+    // - Updates the zoomed pane when the focus changes
+    // Arguments:
+    // - newFocus: the new pane to be zoomed
+    // Return Value:
+    // - <none>
+    void Tab::UpdateZoom(std::shared_ptr<Pane> newFocus)
+    {
+        ASSERT_UI_THREAD();
+
+        // clear the existing content so the old zoomed pane can be added back to the root tree
+        Content(nullptr);
+        _rootPane->Restore(_zoomedPane);
+        _zoomedPane = newFocus;
+        _rootPane->Maximize(_zoomedPane);
+        Content(_zoomedPane->GetRootElement());
+    }
+
+    // Method Description:
+    // - Toggle our zoom state.
+    //   * If we're not zoomed, then zoom the active pane, making it take the
+    //     full size of the tab. We'll achieve this by changing our response to
+    //     Tab::GetTabContent, so that it'll return the zoomed pane only.
+    //   *  If we're currently zoomed on a pane, un-zoom that pane.
+    // Arguments:
+    // - <none>
+    // Return Value:
+    // - <none>
+    void Tab::ToggleZoom()
+    {
+        ASSERT_UI_THREAD();
+
+        if (_zoomedPane)
+        {
+            ExitZoom();
+        }
+        else
+        {
+            EnterZoom();
+        }
+    }
+
+    void Tab::EnterZoom()
+    {
+        ASSERT_UI_THREAD();
+
+        // Agent panes are fixed panels and should not be zoomed.
+        if (_activePane && _activePane->IsAgentPane())
+        {
+            return;
+        }
+
+        // Clear the content first, because with parent focusing it is possible
+        // to zoom the root pane, but setting the content will not trigger the
+        // property changed event since it is the same and you would end up with
+        // an empty tab.
+        Content(nullptr);
+        _zoomedPane = _activePane;
+        _rootPane->Maximize(_zoomedPane);
+        // Update the tab header to show the magnifying glass
+        _tabStatus.IsPaneZoomed(true);
+        Content(_zoomedPane->GetRootElement());
+    }
+    void Tab::ExitZoom()
+    {
+        ASSERT_UI_THREAD();
+
+        Content(nullptr);
+        _rootPane->Restore(_zoomedPane);
+        _zoomedPane = nullptr;
+        // Update the tab header to hide the magnifying glass
+        _tabStatus.IsPaneZoomed(false);
+        Content(_rootPane->GetRootElement());
+    }
+
+    bool Tab::IsZoomed()
+    {
+        ASSERT_UI_THREAD();
+
+        return _zoomedPane != nullptr;
+    }
+
+    // Method Description:
+    // - Toggle the visibility of a pane in this tab.
+    //   * If no pane is hidden, hide the currently active pane. Its sibling
+    //     will expand to fill the space.
+    //   * If a pane is already hidden, restore it to its original position.
+    void Tab::TogglePaneVisibility()
+    {
+        ASSERT_UI_THREAD();
+
+        if (_hiddenPane)
+        {
+            ShowPane();
+        }
+        else
+        {
+            HidePane();
+        }
+    }
+
+    // Method Description:
+    // - Hide the currently active pane. The pane's sibling will expand to fill
+    //   the parent's space. The pane tree structure is preserved in memory.
+    void Tab::HidePane()
+    {
+        ASSERT_UI_THREAD();
+
+        // Can't hide if there's only one pane, or if we're the root pane.
+        if (_rootPane->_IsLeaf())
+        {
+            return;
+        }
+
+        // Find the parent of the active pane.
+        const auto parent = _rootPane->_FindParentOfPane(_activePane);
+        if (!parent)
+        {
+            return;
+        }
+
+        _hiddenPane = _activePane;
+
+        // Determine the sibling that will remain visible.
+        const auto& sibling = (parent->_firstChild == _hiddenPane) ?
+                                  parent->_secondChild :
+                                  parent->_firstChild;
+
+        // Hide the pane in the XAML tree.
+        parent->HidePane(_hiddenPane);
+
+        // Move focus to the sibling (find the last-active leaf within it).
+        const auto focusTarget = sibling->GetActivePane();
+        if (focusTarget)
+        {
+            _UpdateActivePane(focusTarget);
+            focusTarget->SetActive();
+        }
+        _UpdateConnectionClosedState();
+        PaneProjectionChanged.raise();
+    }
+
+    // Method Description:
+    // - Show the previously hidden pane, restoring it to its original position
+    //   with the original split ratio.
+    void Tab::ShowPane()
+    {
+        ASSERT_UI_THREAD();
+
+        if (!_hiddenPane)
+        {
+            return;
+        }
+
+        // Find the parent that owns the hidden pane.
+        const auto parent = _rootPane->_FindParentOfPane(_hiddenPane);
+        if (!parent)
+        {
+            _hiddenPane = nullptr;
+            return;
+        }
+
+        // Restore the pane in the XAML tree.
+        parent->RestorePane(_hiddenPane);
+        _hiddenPane = nullptr;
+        _UpdateAgentPaneIndicators();
+        _UpdateConnectionClosedState();
+        PaneProjectionChanged.raise();
+    }
+
+    bool Tab::HasHiddenPane()
+    {
+        ASSERT_UI_THREAD();
+
+        return _hiddenPane != nullptr;
+    }
+
+    void Tab::RestoreKeptTabState(const Tab& source)
+    {
+        ASSERT_UI_THREAD();
+        CopyKeepRunningState(source);
+        _agentCurrentId = source._agentCurrentId;
+        SetAgentChipOverride(source._agentChipOverride);
+        if (_tabStatus.IsInputBroadcastActive() != source._tabStatus.IsInputBroadcastActive())
+        {
+            ToggleBroadcastInput();
+        }
+        if (source._hiddenPane)
+        {
+            // Content transfer reproduces the tree shape but renumbers pane IDs.
+            const auto findHidden = [&](auto&& self, const auto& oldPane, const auto& newPane) -> std::shared_ptr<Pane> {
+                if (oldPane == source._hiddenPane)
+                {
+                    return newPane;
+                }
+                if (oldPane->_IsLeaf() || newPane->_IsLeaf())
+                {
+                    return nullptr;
+                }
+                const auto first = self(self, oldPane->_firstChild, newPane->_firstChild);
+                return first ? first : self(self, oldPane->_secondChild, newPane->_secondChild);
+            };
+            _hiddenPane = findHidden(findHidden, source._rootPane, _rootPane);
+            THROW_HR_IF(E_UNEXPECTED, !_hiddenPane);
+            const auto parent = _rootPane->_FindParentOfPane(_hiddenPane);
+            THROW_HR_IF(E_UNEXPECTED, !parent);
+            parent->HidePane(_hiddenPane);
+        }
+    }
+
+    TermControl _termControlFromPane(const auto& pane)
+    {
+        if (const auto content{ pane->GetContent() })
+        {
+            if (const auto termContent{ content.try_as<winrt::TerminalApp::TerminalPaneContent>() })
+            {
+                return termContent.GetTermControl();
+            }
+            // Agent pane wraps a TerminalPaneContent — reach through.
+            if (const auto agentContent{ content.try_as<winrt::TerminalApp::AgentPaneContent>() })
+            {
+                return agentContent.GetTermControl();
+            }
+        }
+        return nullptr;
+    }
+
+    // Method Description:
+    // - Toggle read-only mode on the active pane
+    // - If a parent pane is selected, this will ensure that all children have
+    //   the same read-only status.
+    void Tab::TogglePaneReadOnly()
+    {
+        ASSERT_UI_THREAD();
+
+        auto hasReadOnly = false;
+        auto allReadOnly = true;
+        _activePane->WalkTree([&](const auto& p) {
+            if (const auto& control{ _termControlFromPane(p) })
+            {
+                hasReadOnly |= control.ReadOnly();
+                allReadOnly &= control.ReadOnly();
+            }
+        });
+        _activePane->WalkTree([&](const auto& p) {
+            if (const auto& control{ _termControlFromPane(p) })
+            {
+                // If all controls have the same read only state then just toggle
+                if (allReadOnly || !hasReadOnly)
+                {
+                    control.ToggleReadOnly();
+                }
+                // otherwise set to all read only.
+                else if (!control.ReadOnly())
+                {
+                    control.ToggleReadOnly();
+                }
+            }
+        });
+    }
+
+    // Method Description:
+    // - Set read-only mode on the active pane
+    // - If a parent pane is selected, this will ensure that all children have
+    //   the same read-only status.
+    void Tab::SetPaneReadOnly(const bool readOnlyState)
+    {
+        auto hasReadOnly = false;
+        auto allReadOnly = true;
+        _activePane->WalkTree([&](const auto& p) {
+            if (const auto& control{ _termControlFromPane(p) })
+            {
+                hasReadOnly |= control.ReadOnly();
+                allReadOnly &= control.ReadOnly();
+            }
+        });
+        _activePane->WalkTree([&](const auto& p) {
+            if (const auto& control{ _termControlFromPane(p) })
+            {
+                // If all controls have the same read only state then just disable
+                if (allReadOnly || !hasReadOnly)
+                {
+                    control.SetReadOnly(readOnlyState);
+                }
+                // otherwise set to all read only.
+                else if (!control.ReadOnly())
+                {
+                    control.SetReadOnly(readOnlyState);
+                }
+            }
+        });
+    }
+
+    // Method Description:
+    // - Calculates if the tab is read-only.
+    // The tab is considered read-only if one of the panes is read-only.
+    // If, after the calculation, the tab is read-only we hide the close button on the tab view item
+    void Tab::_RecalculateAndApplyReadOnly()
+    {
+        if (const auto control{ GetActiveTerminalControl() })
+        {
+            const auto isReadOnlyActive = control.ReadOnly();
+            _tabStatus.IsReadOnlyActive(isReadOnlyActive);
+        }
+
+        ReadOnly(_rootPane->ContainsReadOnly());
+        _updateIsClosable();
+
+        // Update all the visuals on all our panes, so they can update their
+        // border colors accordingly.
+        _rootPane->WalkTree([](const auto& p) { p->UpdateVisuals(); });
+    }
+
+    std::shared_ptr<Pane> Tab::GetActivePane() const
+    {
+        ASSERT_UI_THREAD();
+
+        return _activePane;
+    }
+
+    // Returns the Pane node in this tab's pane tree that hosts an
+    // AgentPaneContent leaf, if any. Walks the tree; returns the first
+    // match. A tab "has" an agent pane iff this returns non-null.
+    std::shared_ptr<Pane> Tab::FindAgentPane() const
+    {
+        if (!_rootPane)
+        {
+            return nullptr;
+        }
+        return _rootPane->WalkTree([](const std::shared_ptr<Pane>& p) -> std::shared_ptr<Pane> {
+            if (p->IsAgentPane())
+            {
+                return p;
+            }
+            return nullptr;
+        });
+    }
+
+    // Returns the AgentPaneContent leaf hosted in this tab, or nullptr.
+    winrt::TerminalApp::AgentPaneContent Tab::FindAgentPaneContent() const
+    {
+        if (const auto pane = FindAgentPane())
+        {
+            if (const auto content = pane->GetContent())
+            {
+                return content.try_as<winrt::TerminalApp::AgentPaneContent>();
+            }
+        }
+        return nullptr;
+    }
+
+    bool Tab::IsAgentTab() const
+    {
+        if (!_rootPane)
+        {
+            return false;
+        }
+
+        return _rootPane->WalkTree([&](const std::shared_ptr<Pane>& pane) {
+            const auto content = pane->GetContent().try_as<winrt::TerminalApp::AgentPaneContent>();
+            if (!content)
+            {
+                return false;
+            }
+            if (!winrt::get_self<implementation::AgentPaneContent>(content)->AgentSessionId().empty())
+            {
+                return true;
+            }
+
+            for (auto current = pane; current; current = _rootPane->_FindParentOfPane(current))
+            {
+                if (current->IsHidden())
+                {
+                    return false;
+                }
+            }
+            return true;
+        });
+    }
+
+    // Hide the agent pane without destroying it. The pane stays in the tab
+    // tree (so its TermControl + conpty + wta-helper child remain alive),
+    // but its parent split is rewritten so the sibling occupies the full
+    // area. Re-show via `RestoreStashedAgentPane`. Preserves the conversation
+    // history and ACP session across toggle close/open — matches the
+    // "hidden background pane" semantic the toggle is supposed to have.
+    void Tab::StashAgentPane()
+    {
+        ASSERT_UI_THREAD();
+        const auto agentPane = FindAgentPane();
+        if (!agentPane || agentPane->IsHidden())
+        {
+            return;
+        }
+        const auto parent = _rootPane->_FindParentOfPane(agentPane);
+        if (!parent)
+        {
+            // Agent pane IS the root pane — nothing to fold into. The
+            // tree has no sibling for the terminal to expand into. Skip
+            // the stash; the toggle just no-ops here.
+            return;
+        }
+        parent->HidePane(agentPane);
+        _UpdateConnectionClosedState();
+        PaneProjectionChanged.raise();
+        // After HidePane, XAML focus is in limbo (the previously-focused
+        // element — typically the agent pane's TermControl — was just
+        // removed from the visual tree). Hotkeys go through
+        // `TermControl::_TryHandleKeyBinding`, so without a focused
+        // TermControl every subsequent chord is silently swallowed.
+        //
+        // Fallback: `GetActivePane()` returns nullptr when the sibling has
+        // no `_lastActive` descendant — common case is "user clicked the
+        // agent pane, which cleared `_lastActive` on the terminal sibling".
+        // Walk down to the first leaf in that case.
+        const auto sibling = (parent->_firstChild == agentPane) ? parent->_secondChild : parent->_firstChild;
+        std::shared_ptr<Pane> focusTarget = sibling ? sibling->GetActivePane() : nullptr;
+        if (!focusTarget && sibling)
+        {
+            focusTarget = sibling->_FindPane([](const auto& p) { return p->_IsLeaf(); });
+        }
+        if (focusTarget)
+        {
+            // FocusPane first (focusTarget's `_lastActive` is still false
+            // since agent pane was the active one). Then _UpdateActivePane
+            // for the bookkeeping.
+            _rootPane->FocusPane(focusTarget);
+            _UpdateActivePane(focusTarget);
+            // Defer the actual XAML Focus to a low-priority dispatcher tick
+            // (see RestoreStashedAgentPane for the explanation — synchronous
+            // Programmatic focus drops silently on a just-re-parented
+            // element; deferring lets XAML's layout pass complete first).
+            if (const auto termPane = focusTarget->GetContent().try_as<winrt::TerminalApp::TerminalPaneContent>())
+            {
+                if (const auto termControl = termPane.GetTermControl())
+                {
+                    auto dispatcher = DispatcherQueue::GetForCurrentThread();
+                    if (dispatcher)
+                    {
+                        auto weakControl = winrt::make_weak(termControl);
+                        dispatcher.TryEnqueue(DispatcherQueuePriority::Low, [weakControl, weakThis = get_weak()]() {
+                            const auto tab = weakThis.get();
+                            const auto ctrl = weakControl.get();
+                            // A transferred layout may restore a different final focus.
+                            if (tab && ctrl && tab->GetActiveTerminalControl() == ctrl)
+                            {
+                                ctrl.Focus(winrt::Windows::UI::Xaml::FocusState::Programmatic);
+                            }
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // Re-attach a previously-stashed agent pane. `direction` is accepted
+    // for API symmetry with the spawn path but is currently unused — the
+    // pane retains its original parent split (and its `_desiredSplitPosition`),
+    // so restoring is just a XAML re-add via `Pane::RestorePane`.
+    //
+    // CRITICAL: after RestorePane clears + re-adds the parent grid's
+    // children, XAML focus is left in limbo (no focused element). All
+    // subsequent key chords would be swallowed because WT's chord dispatch
+    // is rooted on TermControl — no focused TermControl means no chord
+    // dispatch. We MUST explicitly re-focus the agent pane's TermControl
+    // here; otherwise the next Ctrl+Shift+. (and every hotkey) is eaten.
+    bool Tab::RestoreStashedAgentPane(winrt::Microsoft::Terminal::Settings::Model::SplitDirection /*direction*/)
+    {
+        ASSERT_UI_THREAD();
+        const auto agentPane = FindAgentPane();
+        if (!agentPane || !agentPane->IsHidden())
+        {
+            return false;
+        }
+        const auto parent = _rootPane->_FindParentOfPane(agentPane);
+        if (!parent)
+        {
+            return false;
+        }
+        parent->RestorePane(agentPane);
+        _UpdateConnectionClosedState();
+        PaneProjectionChanged.raise();
+        // Order matters: Pane::_Focus has a `WasLastFocused()` early-return
+        // guard, so do FocusPane (which calls _Focus) FIRST (agent's flag
+        // is still false from the stash). _UpdateActivePane sets the flag.
+        _rootPane->FocusPane(agentPane);
+        // FocusPane's synchronous `_Focus` raised GotFocus, which already
+        // called Tab::_UpdateActivePane(agentPane) via our gotFocus handler
+        // — including the SetSourceOfAgentPane(true) call that pins the
+        // chip / border onto the previously-focused terminal pane. A
+        // redundant _UpdateActivePane(agentPane) here would re-run
+        // ClearActive() and wipe that flag again (the condition that
+        // re-sets it requires `previousActive` to be the non-agent pane,
+        // but at this point previousActive is the agent pane itself).
+        // So only fall through if the GotFocus path didn't update us.
+        if (_activePane != agentPane)
+        {
+            _UpdateActivePane(agentPane);
+        }
+
+        // CRITICAL: synchronous Focus(Programmatic) is unreliable on
+        // freshly-re-parented or freshly-spawned TermControls. The element
+        // is in the visual tree but XAML hasn't completed its layout pass,
+        // so the Focus call silently drops. This is the same failure that
+        // makes spawn-time hotkey not work until the user clicks once —
+        // click goes via XAML's Pointer focus path which works on
+        // not-fully-laid-out elements; Programmatic focus does not.
+        //
+        // Defer the Focus to a low-priority dispatcher tick so XAML's
+        // layout pass + the TermControl's internal init (incl. connection
+        // setup) have time to settle. By then Programmatic focus sticks.
+        if (const auto agentContent = agentPane->GetContent().try_as<winrt::TerminalApp::AgentPaneContent>())
+        {
+            if (const auto termControl = agentContent.GetTermControl())
+            {
+                auto dispatcher = DispatcherQueue::GetForCurrentThread();
+                if (dispatcher)
+                {
+                    auto weakControl = winrt::make_weak(termControl);
+                    dispatcher.TryEnqueue(DispatcherQueuePriority::Low, [weakControl]() {
+                        if (const auto ctrl = weakControl.get())
+                        {
+                            ctrl.Focus(winrt::Windows::UI::Xaml::FocusState::Programmatic);
+                        }
+                    });
+                }
+            }
+        }
+        return true;
+    }
+
+    std::vector<Tab::VisiblePaneSnapshot> Tab::GetVisiblePaneSnapshot() const
+    {
+        std::vector<VisiblePaneSnapshot> result;
+        if (!_rootPane)
+        {
+            return result;
+        }
+
+        const auto activeLeaf = _activePane ?
+                                    (_activePane->_IsLeaf() ? _activePane : _activePane->GetActivePane()) :
+                                    nullptr;
+        const auto visit = [&](const auto& self, const std::shared_ptr<Pane>& pane, bool ancestorHidden) -> void {
+            if (!pane)
+            {
+                return;
+            }
+
+            const auto hidden = ancestorHidden || pane->_hidden;
+            if (pane->_IsLeaf())
+            {
+                if (!hidden && pane->_content && pane->_contentId)
+                {
+                    auto title = pane->_content.Title();
+                    if (title.empty())
+                    {
+                        title = Title();
+                    }
+                    const auto profile = pane->GetProfile();
+                    result.emplace_back(VisiblePaneSnapshot{
+                        .ContentId = pane->_contentId.value(),
+                        .SessionId = pane->GetSessionId(),
+                        .Title = std::move(title),
+                        .Icon = profile ? profile.Icon().Resolved() : winrt::hstring{},
+                        .IsActive = pane == activeLeaf,
+                        .IsAgentPane = pane->_content.try_as<winrt::TerminalApp::AgentPaneContent>() != nullptr ||
+                                       pane->IsAgentPane(),
+                        .ProgressState = pane->_content.TaskbarState(),
+                        .ProgressValue = pane->_content.TaskbarProgress(),
+                    });
+                }
+                return;
+            }
+
+            self(self, pane->_firstChild, hidden);
+            self(self, pane->_secondChild, hidden);
+        };
+        visit(visit, _rootPane, false);
+        return result;
+    }
+
+    std::vector<std::shared_ptr<Pane>> Tab::GetPaneCloseScope(uint32_t contentId) const
+    {
+        std::vector<std::shared_ptr<Pane>> result;
+        if (!_rootPane)
+        {
+            return result;
+        }
+
+        const auto target = _rootPane->FindPaneByContentId(contentId);
+        if (!target)
+        {
+            return result;
+        }
+        result.emplace_back(target);
+
+        if (const auto parent = _rootPane->_FindParentOfPane(target))
+        {
+            const auto& sibling = parent->_firstChild == target ? parent->_secondChild : parent->_firstChild;
+            if (sibling && sibling->_IsLeaf() && sibling->_isAgentPane)
+            {
+                result.emplace_back(sibling);
+            }
+        }
+        return result;
+    }
+
+    bool Tab::HasStashedAgentPane() const
+    {
+        const auto agentPane = FindAgentPane();
+        return agentPane && agentPane->IsHidden();
+    }
+
+    // Method Description:
+    // - Creates a text for the title run in the tool tip by returning tab title
+    // or <profile name>: <tab title> if the profile name differs from the title
+    // Arguments:
+    // - <none>
+    // Return Value:
+    // - The value to populate in the title run of the tool tip
+    winrt::hstring Tab::_CreateToolTipTitle()
+    {
+        if (const auto profile{ GetFocusedProfile() })
+        {
+            const auto profileName{ profile.Name() };
+            if (profileName != Title())
+            {
+                return til::hstring_format(FMT_COMPILE(L"{}: {}"), profileName, Title());
+            }
+        }
+
+        return Title();
+    }
+
+    // Method Description:
+    // - Toggle broadcasting input to all the panes in this tab.
+    void Tab::ToggleBroadcastInput()
+    {
+        const bool newIsBroadcasting = !_tabStatus.IsInputBroadcastActive();
+        _tabStatus.IsInputBroadcastActive(newIsBroadcasting);
+        _rootPane->EnableBroadcast(newIsBroadcasting);
+
+        auto weakThis{ get_weak() };
+
+        // When we change the state of broadcasting, add or remove event
+        // handlers appropriately, so that controls won't be propagating events
+        // needlessly if no one is listening.
+
+        _rootPane->WalkTree([&](const auto& p) {
+            const auto paneId = p->Id();
+            if (!paneId.has_value())
+            {
+                return;
+            }
+            if (const auto& control{ _termControlFromPane(p) })
+            {
+                auto it = _contentEvents.find(*paneId);
+                if (it != _contentEvents.end())
+                {
+                    auto& events = it->second;
+
+                    // Always clear out old ones, just in case.
+                    events.KeySent.revoke();
+                    events.CharSent.revoke();
+                    events.StringSent.revoke();
+
+                    if (newIsBroadcasting)
+                    {
+                        _addBroadcastHandlers(control, events);
+                    }
+                }
+            }
+        });
+    }
+
+    void Tab::_addBroadcastHandlers(const TermControl& termControl, ContentEventTokens& events)
+    {
+        auto weakThis{ get_weak() };
+        // ADD EVENT HANDLERS HERE
+        events.KeySent = termControl.KeySent(winrt::auto_revoke, [weakThis](auto&& sender, auto&& e) {
+            if (const auto tab{ weakThis.get() })
+            {
+                if (tab->_tabStatus.IsInputBroadcastActive())
+                {
+                    tab->_rootPane->BroadcastKey(sender.try_as<TermControl>(),
+                                                 e.VKey(),
+                                                 e.ScanCode(),
+                                                 e.Modifiers(),
+                                                 e.KeyDown());
+                }
+            }
+        });
+
+        events.CharSent = termControl.CharSent(winrt::auto_revoke, [weakThis](auto&& sender, auto&& e) {
+            if (const auto tab{ weakThis.get() })
+            {
+                if (tab->_tabStatus.IsInputBroadcastActive())
+                {
+                    tab->_rootPane->BroadcastChar(sender.try_as<TermControl>(),
+                                                  e.Character(),
+                                                  e.ScanCode(),
+                                                  e.Modifiers());
+                }
+            }
+        });
+
+        events.StringSent = termControl.StringSent(winrt::auto_revoke, [weakThis](auto&& sender, auto&& e) {
+            if (const auto tab{ weakThis.get() })
+            {
+                if (tab->_tabStatus.IsInputBroadcastActive())
+                {
+                    tab->_rootPane->BroadcastString(sender.try_as<TermControl>(),
+                                                    e.Text());
+                }
+            }
+        });
+    }
+
+    void Tab::ThemeColor(const winrt::Microsoft::Terminal::Settings::Model::ThemeColor& focused,
+                         const winrt::Microsoft::Terminal::Settings::Model::ThemeColor& unfocused,
+                         const til::color& tabRowColor)
+    {
+        ASSERT_UI_THREAD();
+
+        _themeColor = focused;
+        _unfocusedThemeColor = unfocused;
+        _tabRowColor = tabRowColor;
+        _RecalculateAndApplyTabColor();
+    }
+
+    // Method Description:
+    // - This function dispatches a function to the UI thread to recalculate
+    //   what this tab's current background color should be. If a color is set,
+    //   it will apply the given color to the tab's background. Otherwise, it
+    //   will clear the tab's background color.
+    // Arguments:
+    // - <none>
+    // Return Value:
+    // - <none>
+    void Tab::_RecalculateAndApplyTabColor()
+    {
+        // GetTabColor will return the color set by the color picker, or the
+        // color specified in the profile. Theme-derived backgrounds only apply
+        // to horizontal tabs; the sidebar uses native themed selection states
+        // unless an explicit tab color is set.
+        const auto currentColor = GetTabColor();
+        if (currentColor.has_value())
+        {
+            _ApplyTabColorOnUIThread(currentColor.value());
+        }
+        else if (!_isVerticalTabLayout && _themeColor != nullptr)
+        {
+            // Safely get the active control's brush.
+            const Media::Brush terminalBrush{ _BackgroundBrush() };
+
+            if (const auto themeBrush{ _themeColor.Evaluate(Application::Current().Resources(), terminalBrush, false) })
+            {
+                // ThemeColor.Evaluate will get us a Brush (because the
+                // TermControl could have an acrylic BG, for example). Take
+                // that brush, and get the color out of it. We don't really
+                // want to have the tab items themselves be acrylic.
+                _ApplyTabColorOnUIThread(til::color{ ThemeColor::ColorFromBrush(themeBrush) });
+            }
+            else
+            {
+                _ClearTabBackgroundColor();
+            }
+        }
+        else
+        {
+            _ClearTabBackgroundColor();
+        }
+        TabColorChanged.raise();
+    }
+
+    // Method Description:
+    // - Applies the given color to the background of this tab's TabViewItem.
+    // - Sets the tab foreground color depending on the luminance of
+    // the background color
+    // - This method should only be called on the UI thread.
+    // Arguments:
+    // - uiColor: the color the user picked for their tab
+    // Return Value:
+    // - <none>
+    void Tab::_ApplyTabColorOnUIThread(const winrt::Windows::UI::Color& uiColor)
+    {
+        constexpr auto lightnessThreshold = 0.6f;
+        const til::color color{ uiColor };
+        Media::SolidColorBrush selectedTabBrush{};
+        Media::SolidColorBrush deselectedTabBrush{};
+        Media::SolidColorBrush fontBrush{};
+        Media::SolidColorBrush deselectedFontBrush{};
+        Media::SolidColorBrush secondaryFontBrush{};
+        Media::SolidColorBrush hoverTabBrush{};
+        Media::SolidColorBrush subtleFillColorSecondaryBrush;
+        Media::SolidColorBrush subtleFillColorTertiaryBrush;
+
+        // calculate the luminance of the current color and select a font
+        // color based on that
+        // see https://www.w3.org/TR/WCAG20/#relativeluminancedef
+        if (ColorFix::GetLightness(color) >= lightnessThreshold)
+        {
+            auto subtleFillColorSecondary = winrt::Windows::UI::Colors::Black();
+            subtleFillColorSecondary.A = 0x09;
+            subtleFillColorSecondaryBrush.Color(subtleFillColorSecondary);
+            auto subtleFillColorTertiary = winrt::Windows::UI::Colors::Black();
+            subtleFillColorTertiary.A = 0x06;
+            subtleFillColorTertiaryBrush.Color(subtleFillColorTertiary);
+        }
+        else
+        {
+            auto subtleFillColorSecondary = winrt::Windows::UI::Colors::White();
+            subtleFillColorSecondary.A = 0x0F;
+            subtleFillColorSecondaryBrush.Color(subtleFillColorSecondary);
+            auto subtleFillColorTertiary = winrt::Windows::UI::Colors::White();
+            subtleFillColorTertiary.A = 0x0A;
+            subtleFillColorTertiaryBrush.Color(subtleFillColorTertiary);
+        }
+
+        // The tab font should be based on the evaluated appearance of the tab color layered on tab row.
+        const auto layeredTabColor = color.layer_over(_tabRowColor);
+        if (ColorFix::GetLightness(layeredTabColor) >= lightnessThreshold)
+        {
+            fontBrush.Color(winrt::Windows::UI::Colors::Black());
+            auto secondaryFontColor = winrt::Windows::UI::Colors::Black();
+            // For alpha value see: https://github.com/microsoft/microsoft-ui-xaml/blob/7a33ad772d77d908aa6b316ec24e6d2eb3ebf571/dev/CommonStyles/Common_themeresources_any.xaml#L269
+            secondaryFontColor.A = 0x9E;
+            secondaryFontBrush.Color(secondaryFontColor);
+        }
+        else
+        {
+            fontBrush.Color(winrt::Windows::UI::Colors::White());
+            auto secondaryFontColor = winrt::Windows::UI::Colors::White();
+            // For alpha value see: https://github.com/microsoft/microsoft-ui-xaml/blob/7a33ad772d77d908aa6b316ec24e6d2eb3ebf571/dev/CommonStyles/Common_themeresources_any.xaml#L14
+            secondaryFontColor.A = 0xC5;
+            secondaryFontBrush.Color(secondaryFontColor);
+        }
+
+        selectedTabBrush.Color(color);
+
+        // Start with the current tab color, set to Opacity=.3
+        auto deselectedTabColor = color.with_alpha(77); // 255 * .3 = 77
+
+        // If we DON'T have a color set from the color picker, or the profile's
+        // tabColor, but if we have an unfocused color in the theme, use the
+        // unfocused theme color here instead.
+        if (!GetTabColor().has_value() &&
+            _unfocusedThemeColor != nullptr)
+        {
+            // Safely get the active control's brush.
+            const Media::Brush terminalBrush{ _BackgroundBrush() };
+
+            // Get the color of the brush.
+            if (const auto themeBrush{ _unfocusedThemeColor.Evaluate(Application::Current().Resources(), terminalBrush, false) })
+            {
+                // We did figure out the brush. Get the color out of it. If it
+                // was "accent" or "terminalBackground", then we're gonna set
+                // the alpha to .3 manually here.
+                // (ThemeColor::UnfocusedTabOpacity will do this for us). If the
+                // user sets both unfocused and focused tab.background to
+                // terminalBackground, this will allow for some differentiation
+                // (and is generally just sensible).
+                deselectedTabColor = til::color{ ThemeColor::ColorFromBrush(themeBrush) }.with_alpha(_unfocusedThemeColor.UnfocusedTabOpacity());
+            }
+        }
+
+        // currently if a tab has a custom color, a deselected state is
+        // signified by using the same color with a bit of transparency
+        deselectedTabBrush.Color(deselectedTabColor.with_alpha(255));
+        deselectedTabBrush.Opacity(deselectedTabColor.a / 255.f);
+
+        hoverTabBrush.Color(color);
+        hoverTabBrush.Opacity(0.6);
+
+        // Account for the color of the tab row when setting the color of text
+        // on inactive tabs. Consider:
+        // * black active tabs
+        // * on a white tab row
+        // * with a transparent inactive tab color
+        //
+        // We don't want that to result in white text on a white tab row for
+        // inactive tabs.
+        const auto deselectedActualColor = deselectedTabColor.layer_over(_tabRowColor);
+        if (ColorFix::GetLightness(deselectedActualColor) >= lightnessThreshold)
+        {
+            deselectedFontBrush.Color(winrt::Windows::UI::Colors::Black());
+        }
+        else
+        {
+            deselectedFontBrush.Color(winrt::Windows::UI::Colors::White());
+        }
+
+        // Add the empty theme dictionaries
+        const auto& tabItemThemeResources{ TabViewItem().Resources().ThemeDictionaries() };
+        ResourceDictionary lightThemeDictionary;
+        ResourceDictionary darkThemeDictionary;
+        ResourceDictionary highContrastThemeDictionary;
+        tabItemThemeResources.Insert(winrt::box_value(L"Light"), lightThemeDictionary);
+        tabItemThemeResources.Insert(winrt::box_value(L"Dark"), darkThemeDictionary);
+        tabItemThemeResources.Insert(winrt::box_value(L"HighContrast"), highContrastThemeDictionary);
+
+        // Apply the color to the tab
+        TabViewItem().Background(deselectedTabBrush);
+
+        // Now actually set the resources we want in them.
+        // Before, we used to put these on the ResourceDictionary directly.
+        // However, HighContrast mode may require some adjustments. So let's just add
+        //   all three so we can make those adjustments on the HighContrast version.
+        for (const auto& [k, v] : tabItemThemeResources)
+        {
+            const bool isHighContrast = winrt::unbox_value<hstring>(k) == L"HighContrast";
+            const auto& currentDictionary = v.as<ResourceDictionary>();
+
+            // TabViewItem.Background
+            currentDictionary.Insert(winrt::box_value(L"TabViewItemHeaderBackground"), selectedTabBrush);
+            currentDictionary.Insert(winrt::box_value(L"TabViewItemHeaderBackgroundSelected"), selectedTabBrush);
+            currentDictionary.Insert(winrt::box_value(L"TabViewItemHeaderBackgroundPointerOver"), isHighContrast ? fontBrush : hoverTabBrush);
+            currentDictionary.Insert(winrt::box_value(L"TabViewItemHeaderBackgroundPressed"), selectedTabBrush);
+
+            // TabViewItem.Foreground (aka text)
+            currentDictionary.Insert(winrt::box_value(L"TabViewItemHeaderForeground"), deselectedFontBrush);
+            currentDictionary.Insert(winrt::box_value(L"TabViewItemHeaderForegroundSelected"), fontBrush);
+            currentDictionary.Insert(winrt::box_value(L"TabViewItemHeaderForegroundPointerOver"), isHighContrast ? selectedTabBrush : fontBrush);
+            currentDictionary.Insert(winrt::box_value(L"TabViewItemHeaderForegroundPressed"), fontBrush);
+
+            // TabViewItem.CloseButton.Foreground (aka X)
+            currentDictionary.Insert(winrt::box_value(L"TabViewItemHeaderCloseButtonForeground"), deselectedFontBrush);
+            currentDictionary.Insert(winrt::box_value(L"TabViewItemHeaderCloseButtonForegroundPressed"), isHighContrast ? deselectedFontBrush : secondaryFontBrush);
+            currentDictionary.Insert(winrt::box_value(L"TabViewItemHeaderCloseButtonForegroundPointerOver"), isHighContrast ? deselectedFontBrush : fontBrush);
+
+            // TabViewItem.CloseButton.Foreground _when_ interacting with the tab
+            currentDictionary.Insert(winrt::box_value(L"TabViewItemHeaderPressedCloseButtonForeground"), fontBrush);
+            currentDictionary.Insert(winrt::box_value(L"TabViewItemHeaderPointerOverCloseButtonForeground"), isHighContrast ? selectedTabBrush : fontBrush);
+            currentDictionary.Insert(winrt::box_value(L"TabViewItemHeaderSelectedCloseButtonForeground"), fontBrush);
+
+            // TabViewItem.CloseButton.Background (aka X button)
+            currentDictionary.Insert(winrt::box_value(L"TabViewItemHeaderCloseButtonBackgroundPressed"), isHighContrast ? selectedTabBrush : subtleFillColorTertiaryBrush);
+            currentDictionary.Insert(winrt::box_value(L"TabViewItemHeaderCloseButtonBackgroundPointerOver"), isHighContrast ? selectedTabBrush : subtleFillColorSecondaryBrush);
+
+            // A few miscellaneous resources that WinUI said may be removed in the future
+            currentDictionary.Insert(winrt::box_value(L"TabViewButtonForegroundActiveTab"), fontBrush);
+            currentDictionary.Insert(winrt::box_value(L"TabViewButtonForegroundPressed"), fontBrush);
+            currentDictionary.Insert(winrt::box_value(L"TabViewButtonForegroundPointerOver"), fontBrush);
+
+            // Add a few extra ones for high contrast mode
+            // BODGY: contrary to the docs, Insert() seems to throw if the value already exists
+            //   Make sure you don't touch any that already exist here!
+            if (isHighContrast)
+            {
+                // TabViewItem.CloseButton.Border: in HC mode, the border makes the button more clearly visible
+                currentDictionary.Insert(winrt::box_value(L"TabViewItemHeaderCloseButtonBorderBrushPressed"), fontBrush);
+                currentDictionary.Insert(winrt::box_value(L"TabViewItemHeaderCloseButtonBorderBrushPointerOver"), fontBrush);
+                currentDictionary.Insert(winrt::box_value(L"TabViewItemHeaderCloseButtonBorderBrushSelected"), fontBrush);
+            }
+        }
+
+        _RefreshVisualState();
+    }
+
+    // Method Description:
+    // - Clear out any color we've set for the TabViewItem.
+    // - This method should only be called on the UI thread.
+    // Arguments:
+    // - <none>
+    // Return Value:
+    // - <none>
+    void Tab::_ClearTabBackgroundColor()
+    {
+        static const winrt::hstring keys[] = {
+            // TabViewItem.Background
+            L"TabViewItemHeaderBackground",
+            L"TabViewItemHeaderBackgroundSelected",
+            L"TabViewItemHeaderBackgroundPointerOver",
+            L"TabViewItemHeaderBackgroundPressed",
+
+            // TabViewItem.Foreground (aka text)
+            L"TabViewItemHeaderForeground",
+            L"TabViewItemHeaderForegroundSelected",
+            L"TabViewItemHeaderForegroundPointerOver",
+            L"TabViewItemHeaderForegroundPressed",
+
+            // TabViewItem.CloseButton.Foreground (aka X)
+            L"TabViewItemHeaderCloseButtonForeground",
+            L"TabViewItemHeaderForegroundSelected",
+            L"TabViewItemHeaderCloseButtonForegroundPointerOver",
+            L"TabViewItemHeaderCloseButtonForegroundPressed",
+
+            // TabViewItem.CloseButton.Foreground _when_ interacting with the tab
+            L"TabViewItemHeaderPressedCloseButtonForeground",
+            L"TabViewItemHeaderPointerOverCloseButtonForeground",
+            L"TabViewItemHeaderSelectedCloseButtonForeground",
+
+            // TabViewItem.CloseButton.Background (aka X button)
+            L"TabViewItemHeaderCloseButtonBackground",
+            L"TabViewItemHeaderCloseButtonBackgroundPressed",
+            L"TabViewItemHeaderCloseButtonBackgroundPointerOver",
+
+            // A few miscellaneous resources that WinUI said may be removed in the future
+            L"TabViewButtonForegroundActiveTab",
+            L"TabViewButtonForegroundPressed",
+            L"TabViewButtonForegroundPointerOver",
+
+            // TabViewItem.CloseButton.Border: in HC mode, the border makes the button more clearly visible
+            L"TabViewItemHeaderCloseButtonBorderBrushPressed",
+            L"TabViewItemHeaderCloseButtonBorderBrushPointerOver",
+            L"TabViewItemHeaderCloseButtonBorderBrushSelected"
+        };
+
+        const auto& tabItemThemeResources{ TabViewItem().Resources().ThemeDictionaries() };
+
+        // simply clear any of the colors in the tab's dict
+        for (const auto& keyString : keys)
+        {
+            const auto key = winrt::box_value(keyString);
+            for (const auto& [_, v] : tabItemThemeResources)
+            {
+                const auto& themeDictionary = v.as<ResourceDictionary>();
+                themeDictionary.Remove(key);
+            }
+        }
+
+        // GH#11382 DON'T set the background to null. If you do that, then the
+        // tab won't be hit testable at all. Transparent, however, is a totally
+        // valid hit test target. That makes sense.
+        TabViewItem().Background(WUX::Media::SolidColorBrush{ Windows::UI::Colors::Transparent() });
+
+        _RefreshVisualState();
+    }
+
+    // Method Description:
+    // BODGY
+    // - Toggles the requested theme of the tab view item,
+    //   so that changes to the tab color are reflected immediately
+    // - Prior to MUX 2.8, we only toggled the visual state here, but that seemingly
+    //   doesn't work in 2.8.
+    // - Just changing the Theme also doesn't seem to work by itself - there
+    //   seems to be a way for the tab to set the deselected foreground onto
+    //   itself as it becomes selected. If the mouse isn't over the tab, that
+    //   can result in mismatched fg/bg's (see GH#15184). So that's right, we
+    //   need to do both.
+    // Arguments:
+    // - <none>
+    // Return Value:
+    // - <none>
+    void Tab::_RefreshVisualState()
+    {
+        const auto& item{ TabViewItem() };
+
+        const auto& reqTheme = TabViewItem().RequestedTheme();
+        item.RequestedTheme(ElementTheme::Light);
+        item.RequestedTheme(ElementTheme::Dark);
+        item.RequestedTheme(reqTheme);
+
+        if (TabViewItem().IsSelected())
+        {
+            VisualStateManager::GoToState(item, L"Normal", true);
+            VisualStateManager::GoToState(item, L"Selected", true);
+        }
+        else
+        {
+            VisualStateManager::GoToState(item, L"Selected", true);
+            VisualStateManager::GoToState(item, L"Normal", true);
+        }
+    }
+
+    TabCloseButtonVisibility Tab::CloseButtonVisibility()
+    {
+        return _closeButtonVisibility;
+    }
+
+    // Method Description:
+    // - set our internal state to track if we were requested to have a visible
+    //   tab close button or not.
+    // - This is called every time the active tab changes. That way, the changes
+    //   in focused tab can be reflected for the "ActiveOnly" state.
+    void Tab::CloseButtonVisibility(TabCloseButtonVisibility visibility)
+    {
+        _closeButtonVisibility = visibility;
+        _updateIsClosable();
+    }
+
+    // Method Description:
+    // - Update our close button's visibility, to reflect both the ReadOnly
+    //   state of the tab content, and also if if we were told to have a visible
+    //   close button at all.
+    //   - the tab being read-only takes precedence. That will always suppress
+    //     the close button.
+    //   - Otherwise we'll use the state set in CloseButtonVisibility to control
+    //     the tab's visibility.
+    void Tab::_updateIsClosable()
+    {
+        bool isClosable = true;
+
+        if (ReadOnly())
+        {
+            isClosable = false;
+        }
+        else
+        {
+            switch (_closeButtonVisibility)
+            {
+            case TabCloseButtonVisibility::Never:
+                isClosable = false;
+                break;
+            case TabCloseButtonVisibility::Hover:
+                isClosable = true;
+                break;
+            case TabCloseButtonVisibility::ActiveOnly:
+                isClosable = _focused();
+                break;
+            default:
+                isClosable = true;
+                break;
+            }
+        }
+        TabViewItem().IsClosable(isClosable);
+    }
+
+    bool Tab::_focused() const noexcept
+    {
+        return _focusState != FocusState::Unfocused;
+    }
+
+    void Tab::_chooseColorClicked(const winrt::Windows::Foundation::IInspectable& /* sender */,
+                                  const winrt::Windows::UI::Xaml::RoutedEventArgs& /* args */)
+    {
+        _dispatch.DoAction(*this, { ShortcutAction::OpenTabColorPicker, nullptr });
+    }
+    void Tab::_renameTabClicked(const winrt::Windows::Foundation::IInspectable& /* sender */,
+                                const winrt::Windows::UI::Xaml::RoutedEventArgs& /* args */)
+    {
+        ActivateTabRenamer();
+    }
+    void Tab::_duplicateTabClicked(const winrt::Windows::Foundation::IInspectable& /* sender */,
+                                   const winrt::Windows::UI::Xaml::RoutedEventArgs& /* args */)
+    {
+        ActionAndArgs actionAndArgs{ ShortcutAction::DuplicateTab, nullptr };
+        _dispatch.DoAction(*this, actionAndArgs);
+    }
+    void Tab::_splitTabClicked(const winrt::Windows::Foundation::IInspectable& /* sender */,
+                               const winrt::Windows::UI::Xaml::RoutedEventArgs& /* args */)
+    {
+        ActionAndArgs actionAndArgs{ ShortcutAction::SplitPane, SplitPaneArgs{ SplitType::Duplicate } };
+        _dispatch.DoAction(*this, actionAndArgs);
+    }
+    void Tab::_closePaneClicked(const winrt::Windows::Foundation::IInspectable& /* sender */,
+                                const winrt::Windows::UI::Xaml::RoutedEventArgs& /* args */)
+    {
+        ClosePane();
+    }
+    void Tab::_exportTextClicked(const winrt::Windows::Foundation::IInspectable& /* sender */,
+                                 const winrt::Windows::UI::Xaml::RoutedEventArgs& /* args */)
+    {
+        ActionAndArgs actionAndArgs{};
+        actionAndArgs.Action(ShortcutAction::ExportBuffer);
+        _dispatch.DoAction(*this, actionAndArgs);
+    }
+    void Tab::_findClicked(const winrt::Windows::Foundation::IInspectable& /* sender */,
+                           const winrt::Windows::UI::Xaml::RoutedEventArgs& /* args */)
+    {
+        ActionAndArgs actionAndArgs{ ShortcutAction::Find, nullptr };
+        _dispatch.DoAction(*this, actionAndArgs);
+    }
+    void Tab::_bubbleRestartTerminalRequested(TerminalApp::TerminalPaneContent sender,
+                                              const winrt::Windows::Foundation::IInspectable& args)
+    {
+        RestartTerminalRequested.raise(sender, args);
+    }
+}

@@ -1,0 +1,270 @@
+# Setup screen titles
+# {Locked="Intelligent Terminal"} - product name, do not translate
+setup.title.agent_missing: "[Àğéñţ ñöţ ƒöûñď!!]"
+setup.title.agent_error: "[Àğéñţ çöññéçţïöñ ƒåïĺéď!!]"
+setup.title.not_available: "[Àğéñţ ñöţ åṽåïĺåƀĺé!!]"
+setup.title.sign_in: "[Ŝïğñ ïñ ŕéqûïŕéď!!]"
+
+# %{agent} is replaced with the agent display name at runtime.
+# {Locked="Settings"} - refers to the Settings page, keep as-is in English UI.
+setup.subtitle.copilot_missing: "[Ÿöûŕ åğéñţ \"%{agent}\" ïś ñöţ ïñśţåĺĺéď. Ƒöĺĺöŵ ţĥé śţéṗś ƀéĺöŵ ţö ïñśţåĺĺ ïţ. Ţö śŵïţçĥ åğéñţś, ğö ţö Intelligent Terminal Settings > Agent.!!!! !!!! !!!! !!!! !!!!]"
+setup.subtitle.agent_missing: "[Ÿöûŕ åğéñţ \"%{agent}\" ïś ñöţ ïñśţåĺĺéď. Ṗĺéåśé ïñśţåĺĺ ïţ ḿåñûåĺĺÿ, ţĥéñ ţŕÿ åğåïñ. Ţö śŵïţçĥ åğéñţś, ğö ţö Intelligent Terminal Settings > Agent.!!!! !!!! !!!! !!!! !!!!]"
+setup.subtitle.copilot_auth: "[Ÿöûŕ åğéñţ \"%{agent}\" ŕéqûïŕéś åûţĥéñţïçåţïöñ. Ƒöĺĺöŵ ţĥé śţéṗś ƀéĺöŵ ţö śïğñ ïñ. Ţö śŵïţçĥ åğéñţś, ğö ţö Intelligent Terminal Settings > Agent.!!!! !!!! !!!! !!!! !!!!]"
+setup.subtitle.agent_auth: "[Ÿöûŕ åğéñţ \"%{agent}\" ŕéqûïŕéś åûţĥéñţïçåţïöñ. Ṗĺéåśé śïğñ ïñ ṽïå ţĥé åğéñţ, ţĥéñ śéĺéçţ \"Ï'ṽé śïğñéð ïñ\" ɓéĺöŵ. Ţö śŵïţçĥ åğéñţś, ğö ţö Intelligent Terminal Settings > Agent.!!!! !!!! !!!! !!!! !!!!]"
+setup.subtitle.connection_failed: "[Ŵé çöûĺďñ'ţ śţåŕţ %{agent}.!!!!]"
+
+# {Locked="Intelligent Terminal"}, {Locked="Settings"}
+
+setup.option.install: "[Ïñśţåĺĺ %{agent}!!]"
+setup.option.install_hint: "[(Ŵïĺĺ ƀé ïñśţåĺĺéď åûţöḿåţïçåĺĺÿ)!!!! !!!!]"
+setup.option.signin: "[Ŝïğñ ïñ ţö %{agent}!!]"
+setup.option.retry_detection: "[Ţŕÿ åğåïñ!!]"
+setup.option.retry_auth: "[Ï'ṽé śïğñéð ïñ — ţŕÿ çöññéçţïñğ åğåïñ!!!! !!!! !!!!]"
+setup.option.retry_connection: "[Ţŕÿ çöññéçţïñğ åğåïñ!!!!]"
+setup.status.installing: "[Îñśţåĺĺïñğ...!!]"
+setup.status.installing_copilot_cli: "[Îñśţåĺĺïñğ GitHub Copilot CLI!!!!]"
+setup.status.connecting_agent: "[Çöññéçţïñğ %{agent}!!!!]"
+setup.status.install_failed: "[Îñśţåĺĺ ƒåïĺéď: !!]"
+setup.status.installing_winget: "[ Îñśţåĺĺïñğ ṽïå winget...!!!! !!!!]"
+setup.error.install_start_failed: "[Ţĥé ïñśţåĺĺéŕ çöûĺď ñöţ ƀé śţåŕţéď. Ŝéĺéçţ \"Ţŕÿ åğåïñ\" ţö ŕéţŕÿ.!!!! !!!! !!!!]"
+setup.error.install_timed_out: "[Ţĥé ïñśţåĺĺåţïöñ ţïḿéď öûţ. Ŝéĺéçţ \"Ţŕÿ åğåïñ\" ƀéƒöŕé śţåŕţïñğ åñöţĥéŕ ïñśţåĺĺåţïöñ.!!!! !!!! !!!! !!!!]"
+setup.error.install_detection_timed_out: "[Îñśţåĺĺåţïöñ ƒïñïśĥéď, ƀûţ Copilot ïś ñöţ ṽïśïƀĺé ÿéţ. Ŝéĺéçţ \"Ţŕÿ åğåïñ\" ţö çĥéçķ åğåïñ.!!!! !!!! !!!! !!!!]"
+
+# ── Auth flow (src/ui/auth.rs) ──────────────────────────────────────────────
+# {Locked="CLI"} - acronym, common usage across Microsoft localizations
+auth.agent_selected: "[Àğéñţ %{name} ïś śéĺéçţéď!!!! !!!!]"
+auth.agent_selected_with_status: "[Àğéñţ %{name} — !!]"
+auth.checking_authentication: "[  %{spinner} Çĥéçķïñğ åûţĥéñţïçåţïöñ...!!!! !!!!]"
+auth.waiting_for_authorization: "[  %{spinner} Ŵåïţïñğ ƒöŕ åûţĥöŕïžåţïöñ...!!!! !!!!]"
+auth.code_copied_hint: "[  Çöďé çöṗïéď ţö çĺïṗƀöåŕď — ṗåśţé ïţ ïñ ÿöûŕ ƀŕöŵśéŕ.!!!! !!!! !!!!]"
+auth.device_code_prompt: "Visit %{url} and enter code: %{code}"  # Copilot device-flow sign-in progress; %{url} is the verification URL, %{code} is the device code
+auth.card_connect: "[  Çöññéçţ %{name} ţö éñåƀĺé åğéñţ ƒéåţûŕéś!!!! !!!!]"
+auth.enterprise_prompt: "  Enter to sign in · E for GitHub Enterprise · Esc to go back"  # {Locked="Enter","E","Esc"}
+auth.enterprise_domain_label: "  Enterprise domain: "
+auth.enterprise_hint_footer: "  Enter to sign in · Esc for github.com"  # {Locked="Enter","Esc","github.com"}
+auth.login_failed_help_enterprise: "  Press Enter to retry, or Esc for github.com. Common causes: a mistyped or unreachable domain, an expired code, or no Copilot access on that host."  # {Locked="Enter","Esc","github.com","Copilot"}
+auth.login_failed_help_default: "  Press Enter to retry, or Esc to go back."  # {Locked="Enter","Esc"}
+
+# ── Chat view (src/ui/chat.rs) ──────────────────────────────────────────────
+chat.activity_thinking: "[Ţĥïñķïñğ…!!]"
+# {Locked="Intelligent Terminal"} - product name, do not translate
+chat.welcome_title: "[Ŵéĺçöḿé ţö Intelligent Terminal!!]"
+# {Locked="Intelligent Terminal","AI"} - product name and acronym, do not translate
+chat.welcome_disclaimer: "[Intelligent Terminal ûśéś AI.!!]"
+chat.plan_header: "[Ṗĺåñ:!!]"
+chat.plan_marker_completed: "[x]"  # {Locked}
+chat.plan_marker_in_progress: "[>]"  # {Locked}
+chat.plan_marker_pending: "[ ]"  # {Locked}
+chat.autofix_prompt_label: "[(Åûţö-ðïåĝñöšéð å réçéñţ çöɱɱåñð ƒåïĺûré!!)]"
+chat.turn_canceled: "[(çåñçéĺéð!!)]"
+chat.turn_executed: "[→ éẋéçûţéð: %{title}!!]"
+# Persistent tool-category labels shown after a status marker and before a subject.
+chat.tool_kind.run: "[Ŕûñ!!]"
+chat.tool_kind.insert: "[Îñśéŕţ!!!]"
+chat.tool_kind.read: "[Ŕéåð!!]"
+chat.tool_kind.search: "[Ŝéåŕçĥ!!]"
+chat.tool_kind.edit: "[Éðïţ!!]"
+chat.tool_kind.delete: "[Ðéĺéţé!!]"
+chat.tool_kind.move: "[Ḿöṽé!!]"
+chat.tool_kind.fetch: "[Ƒéţçĥ!!]"
+chat.tool_kind.think: "[Ţĥïñķ!!]"
+chat.tool_kind.mode: "[Ḿöðé!!]"
+chat.tool_kind.other: "[Ţööĺ!!]"
+
+# ── Input placeholders (src/ui/input.rs) ────────────────────────────────────
+input.placeholder.connected: "[Àśķ åñÿţĥïñğ, / ƒöŕ çöḿḿåñďś..!!!! !!!!]"  # {Locked="/"}
+input.placeholder.connecting: "[çöññéçţïñğ...!!]"
+input.placeholder.disconnected: "[ďïśçöññéçţéď!!]"
+input.image_attachments: "[📎 Îḿåğéś: %{items}!!!!]"  # {Locked="📎","%{items}"}
+
+# ── Command popup (src/ui/command_popup.rs) ─────────────────────────────────
+# {Locked="/"} - slash-command prefix, must remain ASCII
+commands.popup_title: "[ / çöḿḿåñďś !!]"
+commands.help_title: "[ Ĥéĺṗ !!]"
+commands.help_header: "[Ŝĺåśĥ çöḿḿåñďś — ţÿṗé / ïñ ţĥé ïñṗûţ ƀöx.!!!! !!!! !!!!]"
+commands.help_escape_hint: "[  //text     Ŝéñď å ĺïţéŕåĺ '/' (éśçåṗéś ţĥé çöḿḿåñď ṗåŕśéŕ)!!!! !!!! !!!!]"  # {Locked="//text","/"}
+commands.help_close_hint: "[  Esc        Çĺöśé ţĥïś ĥéĺṗ!!!! !!!!]"  # {Locked="Esc"}
+
+# ── Recommendations panel (src/ui/recommendations.rs) ───────────────────────
+# {Locked="Enter","Esc","↵","↑","↓","←","→"} - key names and Return-key glyph, do not translate
+recommendations.nav_hint: "[(↑ ↓ ţö ñåṽïğåţé • ← → ţö śŵïţçĥ ɓûţţöñś • Enter ţö śéĺéçţ • Esc ţö çåñçéĺ)!!!! !!!! !!!! !!!!]"
+recommendations.button_run_command: "[[ Ŕûñ çöḿḿåñď ]!!]"
+recommendations.button_insert_in_terminal: "[Îñśéŕţ ïñ Ţéŕḿïñåĺ!!!! !!!!]"
+recommendations.button_open_in_new_tab: "[Öṗéñ ïñ Ñéŵ Ţåƀ ↵!!!! !!!!]"
+recommendations.button_open_in_new_panel: "[Öṗéñ ïñ Ñéŵ Ṗåñéĺ ↵!!!! !!!!]"
+recommendations.button_open_tab: "[Öṗéñ Ţåƀ ↵!!]"
+recommendations.button_open_panel: "[Öṗéñ Ṗåñéĺ ↵!!]"
+recommendations.button_execute: "[Éxéçûţé ↵!!]"
+recommendations.agent_fallback: "agent"
+recommendations.open_and_send_display: "%{agent}: %{input}"
+recommendations.open_kind_tab: "tab"
+recommendations.open_kind_panel: "panel"
+recommendations.open_kind_panel_direction: "panel (%{direction})"
+recommendations.open_new_with_title_and_cwd: "New %{kind} (%{title}) in %{cwd}"
+recommendations.open_new_with_title: "New %{kind} (%{title})"
+recommendations.open_new_with_cwd: "New %{kind} in %{cwd}"
+recommendations.open_new_empty: "New empty %{kind}"
+
+# ── Permission dialog compact mode (src/ui/permission.rs) ───────────────────
+permission.compact.default_description: "[Ṗéŕḿïśśïöñ ŕéqûéśţéď!!!! !!!!]"
+permission.compact.prefix: "[!] "  # {Locked}
+permission.compact.hint: "[[Y/N ţö åñśŵéŕ · ŕéśïžé ƒöŕ ƒûĺĺ çåŕď]!!!! !!!! !!!!]"  # {Locked="Y/N"}
+
+# ── Agent status (src/agent_check.rs) ───────────────────────────────────────
+agent.status.not_found: "[Ñöţ ƒöûñď!!]"
+# {Locked="winget","GitHub.Copilot","GitHub","Copilot"} - tool names and command, must run verbatim
+agent.install.running_winget: "[Ŕûññïñğ: winget install GitHub.Copilot!!!! !!!! !!!!]"
+agent.install.launch_failed: "[Ƒåïĺéď ţö ĺåûñçĥ winget: %{error}!!!! !!!! !!!!]"
+agent.install.winget_exited: "[winget éxïţéď ûñéxṗéçţéďĺÿ: %{error}!!!! !!!! !!!!]"
+agent.install.winget_failed_code: "[winget ïñśţåĺĺ ƒåïĺéď (éxïţ çöďé %{code})!!!! !!!! !!!!]"
+agent.install.unsupported: "[Àûţöḿåţïç ïñśţåĺĺ ñöţ śûṗṗöŕţéď ƒöŕ %{agent}!!!! !!!! !!!!]"
+agent.custom.auth_hint: "[Ḿåķé śûŕé %{name} ïś ïñśţåĺĺéď åñď öñ ÿöûŕ PATH.!!!! !!!! !!!!]"  # {Locked="PATH"}
+
+# ── Agents view (src/ui/agents_view.rs) ─────────────────────────────────────
+agents.loading: "[Ĺöåďïñğ...!!]"
+# {Locked="Enter","Esc","F5","↑","↓","/"} - key combinations, do not translate
+agents.footer_hint: "[(↑ ↓ ţö ñåṽïğåţé • Enter ţö ĺåûñçĥ śéśśïöñ • Esc ţö éxïţ • F5 ţö ŕéfŕéśĥ • / ţö śéåŕçĥ)!!!! !!!! !!!! !!!!]"
+agents.status.active: "[Àçţïṽé!!]"
+agents.status.waiting_for_input: "[Ŵåïţïñğ ƒöŕ ïñṗûţ!!!! !!!!]"
+agents.status.error: "[Éŕŕöŕ!!]"
+agents.status.idle: "[Îďĺé!!]"
+
+# ── Layout welcome hint (src/ui/layout.rs) ──────────────────────────────────
+layout.welcome_hint: "[(Ctrl+Shift+. ţö śĥöŵ/ĥïďé åğéñţ ṗåñé • Ctrl+Shift+/ ţö śĥöŵ/ĥïďé åğéñţ śéśśïöñ)!!!! !!!! !!!! !!!!]"  # {Locked="Ctrl+Shift+.","Ctrl+Shift+/"}
+
+# ── Connection state ────────────────────────────────────────────────────────
+# Preparing the AI agent connection, including preflight and reuse of a cached agent.
+connection.starting: "[Þŕéþåŕïñğ åğéñţ çöññéçţïöñ...!!!! !!!!]"
+# Retiring old AI agent sessions for /restart, before the next connection phases.
+connection.restarting: "[Ŕéśţåŕţïñğ åğéñţ...!!!!]"
+connection.reconnecting: "[Ŕéçöññéçţïñğ...!!]"
+# Connecting the pane to WTA's local coordinator process, not to an AI model.
+connection.coordinator: "[Çöññéçţïñğ ţö ĺöçåĺ çööŕđïñåţöŕ...!!!! !!!!]"
+# Initializing the helper/coordinator connection, including local preparation and AI agent initialization.
+connection.initializing: "[Ïñïţïåĺïžïñğ åğéñţ çöññéçţïöñ...!!!! !!!!]"
+# Refreshing the user's authentication with the AI agent after login; not verifying the agent's identity.
+connection.authenticating: "[Åûţĥéñţïçåţïñğ ŵïţĥ åğéñţ...!!!! !!!!]"
+# Reading the coordinator's registry snapshot, including existing history; not fetching history from the AI agent.
+connection.syncing_sessions: "[Ŕéåđïñğ śéśśïöñ ĺïśţ...!!!!]"
+# Creating the AI agent session, including local registration; internal agent progress is unknown.
+connection.creating_session: "[Çŕéåţïñğ åğéñţ śéśśïöñ...!!!!]"
+# Applying the requested AI model before the connection is ready. Preserve %{model}.
+connection.selecting_model: "[Ŝéţţïñğ śéśśïöñ ḿöđéĺ: %{model}...!!!! !!!!]"  # {Locked="%{model}"}
+# Activity row while connecting to restore a conversation. Keep the actual stage first so narrow panes show it; session_id is shortened to eight characters.
+connection.resuming_stage: "%{stage} (ŕéśûḿïñğ %{session_id})"  # {Locked="%{stage}","%{session_id}"}
+connection.connecting_activity: "[Çöññéçţïñğ ţö åğéñţ…!!]"
+connection.lost: "[Çöññéçţïöñ ţö ţĥé åğéñţ ŵåś ĺöśţ. Ţýṗé /restart ţö ŕéçöññéçţ.!!]"  # {Locked="/restart"}
+
+# ── System messages (src/app.rs) ────────────────────────────────────────────
+system.close_pane_hint: "[Ṗŕéśś Ctrl+C åğåïñ ţö çĺöśé ṗåñé!!!! !!!!]"  # {Locked="Ctrl+C"}
+system.selection_copied: "[Çöṗïéð!!!]"  # Brief hint shown after selected terminal text is copied
+system.cancelled: "[Çåñçéĺĺéď.!!]"
+system.no_prompt_in_flight: "[Ñö ṗŕöḿṗţ ïñ ƒĺïğĥţ.!!!! !!!!]"
+system.authentication_failed: "[Àûţĥéñţïçåţïöñ ƒåïĺéď!!!! !!!!]"
+system.stopped_max_tokens: "[Ţĥé ŕéśṗöñśé ŵåś çûţ öƒƒ åƒţéŕ ŕéåçĥïñǧ ţĥé ḿöďéĺ'ś öûţṗûţ ĺïḿïţ.!!!! !!!! !!!! !!!! !!!! !!!! !!!! !!!! !!!! !!!! !!!!]"
+system.stopped_max_turn_requests: "[Ţĥé åǧéñţ śţöṗṗéď åƒţéŕ ŕéåçĥïñǧ ïţś ŕéqûéśţ ĺïḿïţ ƒöŕ ţĥïś ţûŕñ.!!!! !!!! !!!! !!!! !!!! !!!! !!!! !!!! !!!! !!!! !!!!]"
+system.stopped_refusal: "[Ţĥé åǧéñţ ďéçĺïñéď ţö çöñţïñûé ŵïţĥ ţĥïś ŕéqûéśţ.!!!! !!!! !!!! !!!! !!!! !!!! !!!! !!!! !!!!]"
+system.agent_busy: "[Àğéñţ ïś ƀûśÿ öñ ţĥïś ţåƀ — ŵåïţ ƒöŕ ţĥé çûŕŕéñţ ṗŕöḿṗţ ţö ƒïñïśĥ.!!!! !!!! !!!! !!!! !!!!]"
+system.image_clipboard_empty: "[Ñö ïḿåğé öñ ţĥé çĺïṗƀöåŕď ţö ṗåśţé.!!!! !!!!]"
+system.image_not_supported: "[Ţĥïś åğéñţ ďöéśñ'ţ śûṗṗöŕţ ïḿåğé ïñṗûţ.!!!! !!!!]"
+system.image_pasted: "[Îḿåğé åţţåçĥéď (%{label}). Ṗŕéśś Enter ţö śéñď.!!!! !!!!]"  # {Locked="%{label}","Enter"}
+system.resuming_session: "[Ŕéśûḿïñğ śéśśïöñ %{session_id}...!!!! !!!!]"
+system.unknown_command: "[Ûñķñöŵñ çöḿḿåñď \"%{command}\" — śéñţ åś ṗŕöḿṗţ. Ţÿṗé /help ƒöŕ ţĥé ĺïśţ.!!!! !!!! !!!! !!!! !!!!]"  # {Locked="/help"}
+system.busy_use_stop: "[Ŵåïţ ƒöŕ ţĥé çûŕŕéñţ ṗŕöḿṗţ ţö ƒïñïśĥ, öŕ /stop ƒïŕśţ.!!!! !!!! !!!! !!!!]"  # {Locked="/stop"}
+system.cannot_focus_session: "[Çåññöţ ƒöçûś śéśśïöñ %{session_id}: ïţ åṗṗéåŕś ĺïṽé ƀûţ ñö ṗåñé ĞÛÎĎ ïś ƀöûñď ÿéţ. Ţŕÿ åğåïñ ïñ å ḿöḿéñţ.!!!! !!!! !!!! !!!! !!!! !!!! !!!!]"
+system.cannot_resume_no_load_session: "[Çåññöţ ŕéśûḿé ïñ åğéñţ ṗåñé: %{agent} ďïď ñöţ åďṽéŕţïśé ţĥé ACP `loadSession` çåṗåƀïĺïţÿ.!!!! !!!! !!!! !!!! !!!! !!!! !!!! !!!!]"  # {Locked="ACP","loadSession"}
+system.cannot_resume_no_resume_flag: "[Çåññöţ ŕéśûḿé %{agent} śéśśïöñ: ţĥïś åğéñţ ĥåś ñö `--resume`-śţÿĺé ƒĺåğ.!!!! !!!! !!!! !!!! !!!! !!!! !!!! !!!!]"  # {Locked="--resume"}
+system.cannot_resume_unknown_agent: "[Çåññöţ ŕéśûḿé śéśśïöñ %{session_id}: ïţś śöûŕçé åğéñţ ïś ûñķñöŵñ ţö ţĥïś ƀûïĺď.!!!! !!!! !!!! !!!! !!!!]"
+system.cannot_resume_phantom_via_flag: "[Çåññöţ ŕéśûḿé %{agent} śéśśïöñ %{session_id}: ïţ ŵåś śţåŕţéď ƀûţ ñéṽéŕ åççûḿûĺåţéď åñÿ çöñṽéŕśåţïöñ, śö %{agent} ïţśéĺƒ ŵöûĺď ŕéĵéçţ ţĥé ŕéśûḿé. Ŕéḿöṽïñğ ţĥé ŕöŵ.!!!! !!!! !!!! !!!! !!!! !!!! !!!! !!!!]"
+system.cannot_resume_phantom_via_load: "[Çåññöţ ŕéśûḿé %{agent} śéśśïöñ %{session_id}: ïţ ŵåś śţåŕţéď ƀûţ ñéṽéŕ åççûḿûĺåţéď åñÿ çöñṽéŕśåţïöñ, śö %{agent} ŵöûĺď ŕéĵéçţ ţĥé ĺöåď. Ŕéḿöṽïñğ ţĥé ŕöŵ.!!!! !!!! !!!! !!!! !!!! !!!! !!!!]"
+system.fallback.this_agent: "[ţĥïś åğéñţ!!]"
+system.fallback.connected_agent: "[ţĥé çöññéçţéď åğéñţ!!!! !!!!]"
+
+# ── Runtime CLI output (src/main.rs) ────────────────────────────────────────
+output.no_windows: "[Ñö ŵïñďöŵś ƒöûñď.!!]"
+output.no_tabs: "[Ñö ţåƀś ƒöûñď.!!]"
+output.no_panes: "[Ñö ṗåñéś ƒöûñď.!!]"
+output.no_windows_in_list: "[Ñö ŵïñďöŵś ƒöûñď!!]"
+output.no_tabs_in_window: "[Ñö ţåƀś ƒöûñď ïñ ŵïñďöŵ %{window_id}!!!! !!!! !!!!]"
+# {Locked="WINDOW_ID","TAB_ID","PANE_ID","PID","ACTIVE","ROWS","COLS","FOCUSED","TITLE"} - column identifiers, kept ASCII for parsing
+output.header.windows: "WINDOW_ID    TITLE                          FOCUSED"
+output.header.tabs: "TAB_ID     TITLE                          FOCUSED"
+output.header.panes: "PANE_ID    PID      ACTIVE   ROWS       COLS"
+output.active_pane: "[Àçţïṽé ṗåñé: %{pane} (ţåƀ: %{tab}, ŵïñďöŵ: %{window})!!!! !!!! !!!!]"
+output.pane_running: "[Ŕûññïñğ (PID: %{pid})!!!! !!!!]"  # {Locked="PID"}
+output.pane_exited: "[Éxïţéď (çöďé: %{code}, PID: %{pid})!!!! !!!!]"  # {Locked="PID"}
+output.created_tab: "[Çŕéåţéď ţåƀ %{tab_id} (ṗåñé %{pane_id})!!!! !!!! !!!!]"
+output.created_pane: "[Çŕéåţéď ṗåñé %{pane_id}!!!! !!!!]"
+output.pane_closed: "[Ṗåñé %{pane_id} çĺöśéď.!!!! !!!!]"
+
+# ── Errors (src/main.rs + src/agent_check.rs) ───────────────────────────────
+error.no_active_pane: "[Ñö åçţïṽé ṗåñé ƒöûñď. Ûśé -t ţö śṗéçïƒÿ å ṗåñé ÎĎ.!!!! !!!! !!!! !!!!]"  # {Locked="-t"}
+error.wt_com_clsid_not_set: "[WT_COM_CLSID ñöţ śéţ. Ŕûñ ïñśïďé å Windows Terminal ṗåñé.!!!! !!!! !!!! !!!!]"  # {Locked="WT_COM_CLSID","Windows Terminal"}
+error.unknown_shell_type: "[Ûñķñöŵñ śĥéĺĺ ţÿṗé '%{shell}'. Ûśé: bash, powershell, cmd, fish!!!! !!!! !!!! !!!!]"  # {Locked="bash","powershell","cmd","fish"}
+# {Locked="wtcli wait-for"} - command name, do not translate
+error.wtcli_wait_for_spawn: "[Ƒåïĺéď ţö śṗåŵñ wtcli wait-for!!!! !!!! !!!!]"
+error.wtcli_wait_for_parse: "[Ƒåïĺéď ţö ṗåŕśé wtcli wait-for öûţṗûţ!!!! !!!! !!!!]"
+error.wtcli_wait_for_failed: "[wtcli wait-for ƒåïĺéď: %{stderr}!!!! !!!! !!!!]"
+
+# ── Hooks status output (src/main.rs) ───────────────────────────────────────
+# {Locked="CLI","PATH","wt-agent-hooks","wta","wta hooks status","%LOCALAPPDATA%","IntelligentTerminal","wta-install-hooks.log"} - tool/CLI names, env vars, log file names
+hooks.bundle_source: "[ƀûñďĺé śöûŕçé: %{source}%{path_suffix}!!!! !!!! !!!!]"
+hooks.cli_not_on_path: "[✗ CLI ñöţ öñ PATH!!]"
+hooks.installed: "[✓ ïñśţåĺĺéď!!]"
+hooks.marketplace_path_stale: "[⚠ ḿåŕķéţṗĺåçé ṗåţĥ śţåĺé!!!! !!!!]"
+hooks.installed_but_disabled: "[⚠ ïñśţåĺĺéď ƀûţ ďïśåƀĺéď!!!! !!!!]"
+hooks.not_installed: "[✗ ñöţ ïñśţåĺĺéď!!]"
+hooks.uninstall_skipped: "[śķïṗṗéď (CLI ñöţ öñ PATH)!!!! !!!!]"
+hooks.install_succeeded: "[✓ wt-agent-hooks ïñśţåĺĺéď ƒöŕ %{clis}!!!! !!!! !!!!]"
+# ── Relative time + date formatting (src/ui/agents_view.rs) ─────────────────
+time.just_now: "just now"
+time.minute_singular: "%{count} minute ago"
+time.minutes_other: "%{count} minutes ago"
+time.hour_singular: "%{count} hour ago"
+time.hours_other: "%{count} hours ago"
+time.day_singular: "%{count} day ago"
+time.days_other: "%{count} days ago"
+
+# ── Slash-command summaries (src/commands.rs) ─────────────────────────────
+# Command names (/help, /clear, etc.) stay English; descriptions translate.
+# {Locked="ACP","Ctrl+Shift+/"} - protocol name and shortcut, do not translate
+commands.help.summary: "[Śĥöŵ ţĥïś çöɱɱåñð ĺïśţ]"
+commands.clear.summary: "[Çĺéåŕ ţĥé çĥåţ śçŕöĺĺɓåçķ (ķéépś śéśśïöñ)]"
+commands.new.summary: "[Śţåŕţ å ƒŕéśĥ ACP śéśśïöñ (ðŕöpś ĥïśţöŕý)]"
+commands.fix.summary: "[Ďïåğñöśé ţĥé åçţïṽé ţéŕɱïñåĺ åñď śûğğéśţ å ƒïẋ (/fix <hint>)!!!! !!!! !!!!]"  # {Locked="/fix","<hint>"}
+commands.restart.summary: "[Ŕéśţåŕţ åğéñţ]"
+commands.stop.summary: "[Çåñçéĺ ţĥé ïñ-ƒĺïğĥţ pŕöɱpţ]"
+commands.sessions.summary: "[Öpéñ ţĥé ĥïśţöŕïçåĺ śéśśïöñś pïçķéŕ (Ctrl+Shift+/)]"
+commands.agent.summary: "[Ṗïçķ ţĥé åğéñţ ƒöŕ ţĥïś ţåƀ (/agent <id> ţö śŵïţçĥ ďïŕéçţĺÿ)!!!! !!!! !!!! !!!!]"  # {Locked="/agent","<id>"}
+
+# ── Recommendation execution (src/coordinator.rs) ───────────────────────────
+system.choice_execution_failed: "[Çĥöïçé %{choice} ƒåïĺéď: %{error}!!!! !!!!]"
+
+# ── Agent picker (src/ui/agent_popup.rs) ────────────────────────────────────
+# {Locked="↑","↓","Enter","Esc"} - key names, do not translate
+agent_picker.title: "[Ŝéĺéçţ åğéñţ (↑ ↓ • Enter • Esc)!!!! !!!!]"  # Agent means an AI coding agent
+# Shown when no policy-allowed AI agent CLI is installed on the machine.
+system.no_agents: "[Ñö åṽåïĺåƀĺé åğéñţ CLI ŵåś ƒöûñď öñ ţĥïś ḿåçĥïñé.!!!! !!!! !!!! !!!!]"  # {Locked="CLI"}
+# {agent} is the unrecognized text the user typed after /agent.
+system.agent_unknown: "[Ûñķñöŵñ öŕ ûñåṽåïĺåƀĺé åğéñţ %{agent} — ţÿṗé /agent ţö śéé ţĥé åṽåïĺåƀĺé ĺïśţ.!!!! !!!! !!!! !!!!]"  # {Locked="/agent"}
+# Shown only when /agent is used outside a Windows Terminal-owned agent pane.
+system.agent_switch_unavailable: "[Àğéñţ śŵïţçĥïñğ ïś ûñåṽåïĺåƀĺé öûţśïďé å Ŵïñďöŵś Ţéŕḿïñåĺ ţåƀ.!!!! !!!! !!!! !!!! !!!!]"
+
+# ── Model picker (/model) ───────────────────────────────────────────────────
+commands.model.summary: "[Ṗïçķ ţĥé ḿöďéĺ ƒöŕ ţĥïś ṗåñé (/model <id> ţö śŵïţçĥ ďïŕéçţĺÿ)!!!! !!!! !!!! !!!!]"  # {Locked="/model","<id>"}
+commands.config.summary: "[Çöñƒïğûŕé ţĥïś åğéñţ śéśśïöñ!!!! !!!! !!!! !!!!]"  # Agent means an AI coding agent; shown for the /config command. {Locked="/config"}
+commands.move.summary: "[Ḿöṽé ţĥïś ţåƀ'ś åğéñţ ṗåñé (/move <position>)!!!! !!!! !!!!]"  # {Locked="/move","<position>"}
+model_picker.title: "[Ŝéĺéçţ ḿöďéĺ (↑ ↓ • Enter • Esc)!!!! !!!!]"  # {Locked="↑","↓","Enter","Esc"}
+system.no_models: "[Ţĥé çöññéçţéď åğéñţ ďïď ñöţ åďṽéŕţïśé åñÿ śéĺéçţåƀĺé ḿöďéĺś.!!!! !!!! !!!! !!!!]"
+system.model_set: "[Ḿöďéĺ ƒöŕ ţĥïś ṗåñé śéţ ţö %{model}.!!!! !!!! !!!!]"  # {Locked="%{model}"}
+
+# ── Session configuration picker (src/ui/config_popup.rs) ───────────────────
+# {Locked="↑","↓","Enter","Esc","ACP"} - key names and protocol name
+config_picker.title: "[Śéśśïöñ çöñƒïğûŕåţïöñ (↑ ↓ • Enter • Esc)!!!! !!!! !!!!]"
+# Shown when /config is used but the AI agent exposed no ACP select options.
+system.no_config_options: "[Ţĥé çöññéçţéď åğéñţ ďïď ñöţ åďṽéŕţïśé åñÿ çöñƒïğûŕåƀĺé śéśśïöñ öṗţïöñś.!!!! !!!! !!!! !!!! !!!!]"
+# {option} is an Agent-provided option name; {error} is the ACP error.
+system.config_update_failed: "[ƒåïĺéď ţö ûṗďåţé %{option}: %{error}!!!! !!!! !!!!]"
+system.yolo_disable_pending: "[ţĥé ṗŕöṽïďéŕ ĥåś ñöţ åçķñöŵĺéďğéď ţĥé ŕéǫûïŕéď ñöñṗŕïṽïĺéğéď śéśśïöñ śţåţé!!!! !!!! !!!! !!!!]"  # Shown after the localized failure prefix while prompts remain blocked until the AI agent provider confirms that its privileged session mode is off. Provider means an AI agent provider, not a network provider.
+system.provider_command_blocked_by_policy: "%{command}: [Åûţöḿåţïç åṗṗŕöṽåĺ ïś ďïśåƀĺéď ƀÿ ÿöûŕ öŕğåñïžåţïöñ'ś ṗöĺïçÿ.!!!! !!!! !!!!]"  # {Locked="%{command}"} Shown when AllowAutomaticApproval blocks a provider-advertised privileged command.
+system.model_unknown: "[Ûñķñöŵñ ḿöďéĺ %{model} — ţÿṗé /model ţö śéé ţĥé åṽåïĺåƀĺé ĺïśţ.!!!! !!!! !!!! !!!!]"  # {Locked="%{model}","/model"}

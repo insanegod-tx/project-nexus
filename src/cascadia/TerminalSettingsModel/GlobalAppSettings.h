@@ -1,0 +1,151 @@
+/*++
+Copyright (c) Microsoft Corporation
+Licensed under the MIT license.
+
+Module Name:
+- GlobalAppSettings.h
+
+Abstract:
+- This class encapsulates all of the settings that are global to the app, and
+    not a part of any particular profile.
+
+Author(s):
+- Mike Griese - March 2019
+
+--*/
+#pragma once
+
+#include "GlobalAppSettings.g.h"
+#include "IInheritable.h"
+#include "MTSMSettings.h"
+
+#include "ActionMap.h"
+#include "Command.h"
+#include "ColorScheme.h"
+#include "Theme.h"
+#include "NewTabMenuEntry.h"
+#include "CustomModelProvider.h"
+#include "RemainingProfilesEntry.h"
+
+// fwdecl unittest classes
+namespace SettingsModelUnitTests
+{
+    class DeserializationTests;
+    class ColorSchemeTests;
+};
+
+// Forward declaration so we can declare the test-hook signature below
+// without pulling in AgentPolicy.h from this widely-included header.
+namespace Microsoft::Terminal::Settings::Model::AgentPolicy
+{
+    struct PolicySnapshot;
+};
+
+namespace winrt::Microsoft::Terminal::Settings::Model::implementation
+{
+    struct GlobalAppSettings : GlobalAppSettingsT<GlobalAppSettings>, IInheritable<GlobalAppSettings>
+    {
+    public:
+        void _FinalizeInheritance() override;
+        com_ptr<GlobalAppSettings> Copy() const;
+
+        Windows::Foundation::Collections::IMapView<hstring, Model::ColorScheme> ColorSchemes() noexcept;
+        void AddColorScheme(const Model::ColorScheme& scheme);
+        void RemoveColorScheme(hstring schemeName);
+        Model::ColorScheme DuplicateColorScheme(const Model::ColorScheme& scheme);
+
+        Model::ActionMap ActionMap() const noexcept;
+        void UpdateCommandID(const Model::Command& cmd, winrt::hstring newID);
+
+        static com_ptr<GlobalAppSettings> FromJson(const Json::Value& json, const OriginTag origin = OriginTag::None);
+        void LayerJson(const Json::Value& json, const OriginTag origin);
+        void LayerActionsFrom(const Json::Value& json, const OriginTag origin, const bool withKeybindings = true);
+
+        Json::Value ToJson();
+        bool FixupsAppliedDuringLoad();
+
+        const std::vector<SettingsLoadWarnings>& KeybindingsWarnings() const;
+
+        // This DefaultProfile() setter is called by CascadiaSettings,
+        // when it parses UnparsedDefaultProfile in _finalizeSettings().
+        void DefaultProfile(const guid& defaultProfile) noexcept;
+        guid DefaultProfile() const;
+
+        Windows::Foundation::Collections::IMapView<hstring, Model::Theme> Themes() noexcept;
+        void AddTheme(const Model::Theme& theme);
+        Model::Theme CurrentTheme() noexcept;
+        bool ShouldUsePersistedLayout() const;
+
+        void ExpandCommands(const Windows::Foundation::Collections::IVectorView<Model::Profile>& profiles,
+                            const Windows::Foundation::Collections::IMapView<winrt::hstring, Model::ColorScheme>& schemes);
+
+        bool LegacyReloadEnvironmentVariables() const noexcept { return _legacyReloadEnvironmentVariables; }
+        bool LegacyForceVTInput() const noexcept { return _legacyForceVTInput; }
+
+        void LogSettingChanges(std::set<std::string>& changes, const std::string_view& context) const;
+
+        void ResolveMediaResources(const Model::MediaResourceResolver& resolver);
+
+        winrt::hstring SourceBasePath;
+
+        // ── Policy-aware effective getters ───────────────────────────────
+        // These return the user setting value after applying GPO policy
+        // overrides. If the selected agent is blocked by policy, returns
+        // empty. If a feature is blocked by policy, returns false.
+        hstring EffectiveAcpAgent() const;
+        hstring EffectiveDelegateAgent() const;
+        bool EffectiveAutoErrorDetectionEnabled() const;
+        bool EffectiveAutoFixEnabled() const;
+        bool EffectiveAgentSessionManagementEnabled() const;
+        bool EffectiveAgentPaneYoloMode() const;
+        bool CanEnableAgentPaneYoloMode() const;
+        bool CanEnableAgentPaneYoloModeForAgent(const winrt::hstring& agentId) const;
+        bool ClearAgentPaneYoloModeIfUnavailableDefault();
+        bool ClearAgentPaneYoloModeIfPolicyBlocked();
+
+        // Whether GPO policy is actively restricting these settings.
+        bool IsAgentPolicyLocked() const;
+        bool IsCustomAgentPolicyLocked() const;
+        bool IsAutoFixPolicyLocked() const;
+        bool IsAgentSessionHooksPolicyLocked() const;
+        bool IsYoloModePolicyLocked() const;
+
+        // ── Test-only seam ──────────────────────────────────────────────
+        // Replace the SettingsModel DLL's cached AgentPolicy snapshot
+        // with a test-controlled value. Compiled into SettingsModel.dll
+        // so writes target the same `s_snapshot` that
+        // EffectiveAcpAgent / EffectiveDelegateAgent read. Pair every
+        // call with _TestHookResetAgentPolicy() in test cleanup.
+        // NOT for production use.
+        static void _TestHookSetAgentPolicy(std::shared_ptr<const ::Microsoft::Terminal::Settings::Model::AgentPolicy::PolicySnapshot> snap);
+        static void _TestHookResetAgentPolicy();
+
+        INHERITABLE_SETTING(Model::GlobalAppSettings, hstring, UnparsedDefaultProfile, L"");
+
+#define GLOBAL_SETTINGS_INITIALIZE(type, name, jsonKey, ...) \
+    INHERITABLE_SETTING_WITH_LOGGING(Model::GlobalAppSettings, type, name, jsonKey, ##__VA_ARGS__)
+        MTSM_GLOBAL_SETTINGS(GLOBAL_SETTINGS_INITIALIZE)
+#undef GLOBAL_SETTINGS_INITIALIZE
+
+    private:
+#ifdef NDEBUG
+        static constexpr bool debugFeaturesDefault{ false };
+#else
+        static constexpr bool debugFeaturesDefault{ true };
+#endif
+
+        winrt::guid _defaultProfile{};
+        bool _fixupsAppliedDuringLoad{ false };
+        bool _legacyReloadEnvironmentVariables{ true };
+        bool _legacyForceVTInput{ false };
+        winrt::com_ptr<implementation::ActionMap> _actionMap{ winrt::make_self<implementation::ActionMap>() };
+        std::set<std::string> _changeLog;
+
+        std::vector<SettingsLoadWarnings> _keybindingsWarnings;
+        Windows::Foundation::Collections::IMap<winrt::hstring, Model::ColorScheme> _colorSchemes{ winrt::single_threaded_map<winrt::hstring, Model::ColorScheme>() };
+        Windows::Foundation::Collections::IMap<winrt::hstring, Model::Theme> _themes{ winrt::single_threaded_map<winrt::hstring, Model::Theme>() };
+
+        void _logSettingSet(const std::string_view& setting);
+        void _logSettingIfSet(const std::string_view& setting, const bool isSet);
+    };
+}

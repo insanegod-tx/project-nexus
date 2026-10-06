@@ -1,0 +1,2861 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+//
+// This file contains much of the code related to tab management for the
+// TerminalPage. Things like opening new tabs, selecting different tabs,
+// switching tabs, should all be handled in this file. Hypothetically, in the
+// future, the contents of this file could be moved to a separate class
+// entirely.
+//
+
+#include "pch.h"
+#include "TerminalPage.h"
+#include "../inc/AgentRegistry.h"
+#include "../inc/AgentPaneRestore.h"
+#include "Utils.h"
+#include "../../types/inc/utils.hpp"
+#include "../../inc/til/string.h"
+#include <til/io.h>
+#include <json/json.h>
+
+#include "AgentPaneContent.h"
+#include "AgentPaneLog.h"
+#include "ShellIntegrationSweep.h"
+#include "SharedWta.h"
+#include "TabRowControl.h"
+#include "TabStrip.h"
+#include "DebugTapConnection.h"
+#include "DesktopNotification.h"
+#include "..\TerminalSettingsModel\FileUtils.h"
+#include "../TerminalSettingsAppAdapterLib/TerminalSettings.h"
+
+#include <shlobj.h>
+#include <sddl.h>
+
+using namespace winrt;
+using namespace winrt::Windows::Foundation::Collections;
+using namespace winrt::Windows::UI::Xaml;
+using namespace winrt::Windows::UI::Xaml::Controls;
+using namespace winrt::Windows::UI::Core;
+using namespace winrt::Windows::System;
+using namespace winrt::Windows::ApplicationModel::DataTransfer;
+using namespace winrt::Windows::UI::Text;
+using namespace winrt::Windows::Storage;
+using namespace winrt::Windows::Storage::Pickers;
+using namespace winrt::Windows::Storage::Provider;
+using namespace winrt::Microsoft::Terminal;
+using namespace winrt::Microsoft::Terminal::Control;
+using namespace winrt::Microsoft::Terminal::TerminalConnection;
+using namespace winrt::Microsoft::Terminal::Settings::Model;
+using namespace ::TerminalApp;
+using namespace ::Microsoft::Console;
+
+namespace winrt
+{
+    namespace MUX = Microsoft::UI::Xaml;
+    namespace WUX = Windows::UI::Xaml;
+    using IInspectable = Windows::Foundation::IInspectable;
+}
+
+namespace winrt::TerminalApp::implementation
+{
+    winrt::hstring TerminalPage::_AgentIconForControl(const TermControl& control, const winrt::hstring& profileIcon)
+    {
+        if (control)
+        {
+            if (const auto agentInfo = _RichTabAgentInfoForControl(control);
+                agentInfo &&
+                (agentInfo->status == "Idle" ||
+                 agentInfo->status == "Working" ||
+                 agentInfo->status == "Attention" ||
+                 agentInfo->status == "Error"))
+            {
+                const auto providerId = winrt::to_hstring(agentInfo->providerId);
+                for (const auto& agent : ::Microsoft::Terminal::Settings::Model::AgentRegistry::BuiltinAcpAgents)
+                {
+                    if (::Microsoft::Terminal::Settings::Model::AgentRegistry::AgentIdEquals(agent.id, providerId))
+                    {
+                        return winrt::hstring{ L"ms-appx:///AgentIcons/" } + winrt::hstring{ agent.id } + L".svg";
+                    }
+                }
+            }
+        }
+        return profileIcon;
+    }
+
+    // Method Description:
+    // - Open a new tab. This will create the TerminalControl hosting the
+    //   terminal, and add a new Tab to our list of tabs. The method can
+    //   optionally be provided a NewTerminalArgs, which will be used to create
+    //   a tab using the values in that object.
+    // Arguments:
+    // - newTerminalArgs: An object that may contain a blob of parameters to
+    //   control which profile is created and with possible other
+    //   configurations. See TerminalSettings::CreateWithNewTerminalArgs for more details.
+    // - existingConnection: An optional connection that is already established to a PTY
+    //   for this tab to host instead of creating one.
+    //   If not defined, the tab will create the connection.
+    HRESULT TerminalPage::_OpenNewTab(const INewContentArgs& newContentArgs, bool openInBackground)
+    try
+    {
+        if (const auto& newTerminalArgs{ newContentArgs.try_as<NewTerminalArgs>() })
+        {
+            const auto profile{ _settings.GetProfileForArgs(newTerminalArgs) };
+            // GH#11114: GetProfileForArgs can return null if the index is higher
+            // than the number of available profiles.
+            if (!profile)
+            {
+                return S_FALSE;
+            }
+            const auto settings{ Settings::TerminalSettings::CreateWithNewTerminalArgs(_settings, newTerminalArgs) };
+
+            // Try to handle auto-elevation
+            if (!newTerminalArgs.ContentId() && _maybeElevate(newTerminalArgs, settings, profile))
+            {
+                return S_OK;
+            }
+            // We can't go in the other direction (elevated->unelevated)
+            // unfortunately. This seems to be due to Centennial quirks. It works
+            // unpackaged, but not packaged.
+        }
+
+        // This call to _MakePane won't return nullptr, we already checked that
+        // case above with the _maybeElevate call.
+        return _CreateNewTabFromPane(_MakePane(newContentArgs, nullptr), -1, openInBackground) ? S_OK : S_FALSE;
+    }
+    CATCH_RETURN();
+
+    // Method Description:
+    // - Sets up state, event handlers, etc on a tab object that was just made.
+    // Arguments:
+    // - newTabImpl: the uninitialized tab.
+    // - insertPosition: Optional parameter to indicate the position of tab.
+    void TerminalPage::_InitializeTab(winrt::com_ptr<Tab> newTabImpl, uint32_t insertPosition, bool openInBackground)
+    {
+        newTabImpl->Initialize();
+
+        if (_pendingNewTabLoadSession)
+        {
+            auto pending = std::move(*_pendingNewTabLoadSession);
+            _pendingNewTabLoadSession.reset();
+            newTabImpl->SuppressAgentPrewarm();
+            if (!pending.agentId.empty())
+            {
+                newTabImpl->SetAgentOverride(
+                    pending.agentId,
+                    pending.agentModel,
+                    {},
+                    pending.agentSource,
+                    pending.agentWslDistro,
+                    Tab::AgentOverrideOrigin::Restore);
+            }
+            _pendingLoadSessions[newTabImpl->StableId()] = std::move(pending);
+        }
+
+        // If insert position is not passed, calculate it
+        if (insertPosition == -1)
+        {
+            insertPosition = _tabs.Size();
+            if (_settings.GlobalSettings().NewTabPosition() == NewTabPosition::AfterCurrentTab)
+            {
+                auto currentTabIndex = _GetFocusedTabIndex();
+                if (currentTabIndex.has_value())
+                {
+                    insertPosition = currentTabIndex.value() + 1;
+                }
+            }
+        }
+        insertPosition = std::clamp(insertPosition, _PinnedTabCount(), _tabs.Size());
+
+        // Add the new tab to the list of our tabs.
+        _tabs.InsertAt(insertPosition, *newTabImpl);
+        _mruTabs.Append(*newTabImpl);
+        _NotifyRestoredSessionBindings(newTabImpl);
+
+        newTabImpl->SetDispatch(*_actionDispatch);
+        newTabImpl->SetActionMap(_settings.ActionMap());
+        newTabImpl->SetVerticalTabLayout(_isVerticalLayout);
+
+        // Give the tab its index in the _tabs vector so it can manage its own SwitchToTab command.
+        _UpdateTabIndices();
+
+        // Hookup our event handlers to the new terminal
+        _RegisterTabEvents(*newTabImpl);
+
+        // Don't capture a strong ref to the tab. If the tab is removed as this
+        // is called, we don't really care anymore about handling the event.
+        auto weakTab = make_weak(newTabImpl);
+        newTabImpl->SetHeaderResolver([weakTab, weakThis = get_weak()](const bool realize) -> TerminalApp::TabHeaderControl {
+            const auto page = weakThis.get();
+            const auto tab = weakTab.get();
+            return page && tab ?
+                       winrt::get_self<implementation::TabStrip>(page->_tabStrip)->HeaderForTab(tab->TabViewItem(), realize).try_as<TerminalApp::TabHeaderControl>() :
+                       nullptr;
+        });
+
+        // When the tab's active pane changes, we'll want to lookup a new icon
+        // for it. The Title change will be propagated upwards through the tab's
+        // PropertyChanged event handler.
+        newTabImpl->ActivePaneChanged({ get_weak(), &TerminalPage::_activePaneChanged });
+        newTabImpl->PaneProjectionChanged([weakTab, weakThis{ get_weak() }]() {
+            const auto page = weakThis.get();
+            const auto tab = weakTab.get();
+            if (page && tab)
+            {
+                page->_ApplyTabListProjection(*tab);
+            }
+        });
+        newTabImpl->TabColorChanged([weakTab, weakThis{ get_weak() }]() {
+            const auto page = weakThis.get();
+            const auto tab = weakTab.get();
+            if (page && tab && page->_isVerticalLayout)
+            {
+                winrt::get_self<implementation::TabStrip>(page->_tabStrip)->RefreshTabColor(tab->TabViewItem());
+                page->_UpdateSidebarHistoryCurrentSession();
+            }
+        });
+        newTabImpl->PinRequested([weakTab, weakThis{ get_weak() }](bool pinned) {
+            if (const auto page = weakThis.get())
+            {
+                if (const auto tab = weakTab.get())
+                {
+                    page->_RequestPinTab(tab, pinned);
+                }
+            }
+        });
+
+        // The RaiseVisualBell event has been bubbled up to here from the pane,
+        // the next part of the chain is bubbling up to app logic, which will
+        // forward it to app host.
+        newTabImpl->TabRaiseVisualBell([weakTab, weakThis{ get_weak() }]() {
+            auto page{ weakThis.get() };
+            auto tab{ weakTab.get() };
+
+            if (page && tab)
+            {
+                page->RaiseVisualBell.raise(nullptr, nullptr);
+            }
+        });
+
+        // When a tab requests a desktop toast notification, send the toast
+        // and handle activation by summoning this window and switching to the tab.
+        newTabImpl->TabToastNotificationRequested([weakThis{ get_weak() }, weakTab{ newTabImpl->get_weak() }](const winrt::hstring& title, const winrt::hstring& body, const winrt::TerminalApp::IPaneContent& content) {
+            if (const auto page{ weakThis.get() })
+            {
+                if (const auto tab{ weakTab.get() })
+                {
+                    page->_SendDesktopNotification(title, body, tab, content);
+                }
+            }
+        });
+
+        auto tabViewItem = newTabImpl->TabViewItem();
+
+        // Initialize the icon before the item enters the visual collection so
+        // the tab header does not render a text-only first frame.
+        _UpdateTabIcon(*newTabImpl);
+
+        // Prepare vertical chrome before the item enters the visual collection
+        // so its first rendered frame already has the final shape.
+        if (_isVerticalLayout)
+        {
+            winrt::get_self<implementation::TabStrip>(_tabStrip)->PrepareTabItem(tabViewItem);
+        }
+
+        _tabItems().InsertAt(insertPosition, tabViewItem);
+
+        tabViewItem.PointerPressed({ this, &TerminalPage::_OnTabPointerPressed });
+
+        // When the tab requests close, try to close it (prompt for approval, if required)
+        newTabImpl->CloseRequested([weakTab, weakThis{ get_weak() }](auto&& /*s*/, auto&& /*e*/) {
+            auto page{ weakThis.get() };
+            auto tab{ weakTab.get() };
+
+            if (page && tab)
+            {
+                page->_HandleCloseTabRequested(*tab);
+            }
+        });
+
+        // When the tab is closed, remove it from our list of tabs.
+        newTabImpl->Closed([weakTab, weakThis{ get_weak() }](auto&& /*s*/, auto&& /*e*/) {
+            const auto page = weakThis.get();
+            const auto tab = weakTab.get();
+
+            if (page && tab)
+            {
+                page->_RemoveTab(*tab);
+            }
+        });
+
+        // The tab might want us to toss focus into the control, especially when
+        // transient UIs (like the context menu, or the renamer) are dismissed.
+        newTabImpl->RequestFocusActiveControl([weakThis{ get_weak() }]() {
+            if (const auto page{ weakThis.get() })
+            {
+                if (!page->_suppressTabFocusRequests)
+                {
+                    page->_FocusCurrentTab(false);
+                }
+            }
+        });
+
+        newTabImpl->TabLayoutChangeRequested([weakThis{ get_weak() }](auto&&, const TabLayout target) {
+            if (const auto page{ weakThis.get() })
+            {
+                page->_RequestTabLayoutChange(target);
+            }
+        });
+
+        newTabImpl->KeepRunningEnabledByUser([weakTab, weakThis{ get_weak() }]() {
+            const auto page = weakThis.get();
+            const auto tab = weakTab.get();
+            if (page && tab && page->_GetTabIndex(*tab))
+            {
+                const auto pinnedCount = page->_KeepRunningTabCounts().second;
+                TraceLoggingWrite(
+                    g_hTerminalAppProvider,
+                    "SidebarTabPinned",
+                    TraceLoggingDescription("User enabled keep running for a sidebar tab"),
+                    TraceLoggingUInt32(pinnedCount, "pinned_count"),
+                    TraceLoggingKeyword(MICROSOFT_KEYWORD_MEASURES),
+                    TelemetryPrivacyDataTag(PDT_ProductAndServiceUsage));
+                page->_LogKeepRunningMarked(tab);
+            }
+        });
+
+        // This kicks off TabView::SelectionChanged, in response to which
+        // we'll attach the terminal's Xaml control to the Xaml root.
+        if (!openInBackground)
+        {
+            // Explicit new-tab actions leave History, but protocol activation
+            // changes the focused content without changing the sidebar view.
+            const auto historyWasActive = _tabStrip && _tabStrip.HistoryActive();
+            if (historyWasActive && !_preserveSidebarHistory)
+            {
+                _CloseSidebarHistory(false);
+            }
+            _selectedTabItem(tabViewItem);
+        }
+        else
+        {
+            // Add to visual tree hidden so TermControl initializes
+            // (gets layout, creates TextBuffer, starts connection).
+            // Cleaned up by _UpdatedSelectedTab on next tab switch.
+            auto content = newTabImpl->Content();
+            content.Opacity(0);
+            content.IsHitTestVisible(false);
+            _tabContent.Children().Append(content);
+        }
+
+        // Per-tab model: pre-warm a stashed agent pane on every new terminal
+        // tab. The helper conpty child is spawned but the pane is immediately
+        // stashed via `Tab::StashAgentPane`, so the user only sees the
+        // terminal pane. Toggling the agent pane (`Ctrl+Shift+.` /
+        // `Ctrl+Shift+/` / bottom-bar button) is just a stash/restore.
+        // The point of pre-warming is autofix: autofix routes through the
+        // agent helper, and gating it on "user has opened the pane at least
+        // once" silently broke autofix on every fresh tab. With pre-warm,
+        // autofix works on every tab from the moment the tab opens.
+        //
+        // Defer the spawn so tab initialization is not blocked on conpty and
+        // helper startup.
+        if (auto dispatcher = winrt::Windows::System::DispatcherQueue::GetForCurrentThread())
+        {
+            auto weakSelf = get_weak();
+            auto weakTab = make_weak(newTabImpl);
+            // Read now, not in the callback: by the time the low-priority tick
+            // runs, the replay may have finished even though this tab's own
+            // agent pane is still queued behind it.
+            const auto deferPrewarm =
+                _startupActionReplayDepth > 0 || _pendingFreEnsureAgentPaneVisible;
+            if (deferPrewarm)
+            {
+                // Queue synchronously. The low-priority callback below runs
+                // after `_PrewarmAgentPanesAfterStartup` for the last tabs of a
+                // batch, so recording there would miss them entirely.
+                _tabsAwaitingPrewarm.emplace_back(make_weak(newTabImpl));
+            }
+            auto initializeDeferred = [weakSelf, weakTab, deferPrewarm]() {
+                const auto self = weakSelf.get();
+                const auto tabImplCom = weakTab.get();
+                if (!self || !tabImplCom || !self->_GetTabIndex(*tabImplCom))
+                {
+                    return;
+                }
+                const auto rootPane = tabImplCom->GetRootPane();
+                if (!rootPane)
+                {
+                    return;
+                }
+                const auto newTabId = tabImplCom->StableId();
+                int agentLeavesSeen = 0;
+                rootPane->WalkTree([self, &tabImplCom, &newTabId, &agentLeavesSeen](const std::shared_ptr<Pane>& p) -> void {
+                    if (!p)
+                    {
+                        return;
+                    }
+                    if (p->GetContent() && p->GetContent().try_as<winrt::TerminalApp::AgentPaneContent>())
+                    {
+                        ++agentLeavesSeen;
+                    }
+                    if (!p->IsAgentPane())
+                    {
+                        return;
+                    }
+                    const auto content = p->GetContent().try_as<winrt::TerminalApp::AgentPaneContent>();
+                    if (!content)
+                    {
+                        return;
+                    }
+                    self->_WireAgentPaneEvents(content, tabImplCom);
+
+                    const auto impl = winrt::get_self<winrt::TerminalApp::implementation::AgentPaneContent>(content);
+                    if (tabImplCom->GetLeafPaneCount() > 1 && impl->TakeHiddenAfterTransfer())
+                    {
+                        tabImplCom->StashAgentPane();
+                    }
+                    if (const auto sourceProfileGuid = impl->TakePendingAgentSourceProfileGuid())
+                    {
+                        tabImplCom->AgentSourceProfileGuid(*sourceProfileGuid);
+                    }
+
+                    const auto oldTabId = impl->TakePendingRenameFromTabId();
+                    if (oldTabId.empty() || oldTabId == newTabId)
+                    {
+                        return;
+                    }
+
+                    Json::Value params;
+                    params["old_tab_id"] = winrt::to_string(oldTabId);
+                    params["new_tab_id"] = winrt::to_string(newTabId);
+                    params["window_id"] = std::to_string(self->_WindowProperties.WindowId());
+                    _agentPaneLog(
+                        std::string{ "_InitializeTab(deferred): emitting tab_renamed old=" } +
+                        winrt::to_string(oldTabId) + " new=" + winrt::to_string(newTabId));
+                    self->_RaiseProtocolEvent("tab_renamed", params);
+                });
+
+                // Pre-warm a stashed agent pane on this tab so the helper is
+                // running from the start (autofix needs it). A transferred
+                // pane keeps its existing helper and skips this path, and a
+                // tab created while a startup batch is replaying skips it so a
+                // blank pre-warm cannot race the agent pane that batch is
+                // about to restore — `_PrewarmAgentPanesAfterStartup` covers
+                // whatever the replay left without one.
+                if (deferPrewarm)
+                {
+                    _agentPaneLog(
+                        std::string{ "_InitializeTab(deferred): startup replay owns the agent pane for tab " } +
+                        winrt::to_string(newTabId));
+                }
+                else if (agentLeavesSeen == 0 && !tabImplCom->AgentPrewarmSuppressed())
+                {
+                    _agentPaneLog(
+                        std::string{ "_InitializeTab(deferred): pre-warming stashed agent pane on tab " } +
+                        winrt::to_string(newTabId));
+                    self->_AutoCreateHiddenAgentPaneShared(tabImplCom, /*intoSessionsView*/ false, /*autoStash*/ true);
+                }
+                else
+                {
+                    self->_UpdateBottomBarState();
+                }
+            };
+            if (_receivingContentTransfer)
+            {
+                _receivingContentTransfer->afterCommit.emplace_back(std::move(initializeDeferred));
+            }
+            else
+            {
+                dispatcher.TryEnqueue(winrt::Windows::System::DispatcherQueuePriority::Low, std::move(initializeDeferred));
+            }
+        }
+    }
+
+    // Method Description:
+    // - Create a new tab using a specified pane as the root.
+    // Arguments:
+    // - pane: The pane to use as the root.
+    // - insertPosition: Optional parameter to indicate the position of tab.
+    TerminalApp::Tab TerminalPage::_CreateNewTabFromPane(std::shared_ptr<Pane> pane, uint32_t insertPosition, bool openInBackground)
+    {
+        if (pane)
+        {
+            auto closeOnFailure = wil::scope_exit([&]() noexcept {
+                if (pane->IsAgentPane())
+                {
+                    try
+                    {
+                        pane->Shutdown();
+                    }
+                    CATCH_LOG()
+                }
+            });
+            ShellIntegrationSweep::QueueNewTabWslInstallWork<winrt::TerminalApp::TerminalPaneContent>(
+                _settings.GlobalSettings(),
+                pane,
+                get_strong(),
+                _shellIntegrationDesiredEnabled,
+                _shellIntegrationReconcileMutex);
+            auto newTabImpl = winrt::make_self<Tab>(
+                pane, _receivingContentTransfer && _receivingContentTransfer->restoringKeptTab ? _receivingContentTransfer->sourceTab->StableId() : winrt::hstring{});
+            if (_receivingContentTransfer)
+            {
+                _receivingContentTransfer->tabs.push_back(newTabImpl);
+                _CheckpointContentTransfer(ContentTransferStage::BeforeFirstPaneInsertion, _receivingContentTransfer->firstContentId);
+            }
+            _InitializeTab(newTabImpl, insertPosition, openInBackground);
+            closeOnFailure.release();
+            return *newTabImpl;
+        }
+        return nullptr;
+    }
+
+    // Method Description:
+    // - Get the icon of the currently focused terminal control, and set its
+    //   tab's icon to that icon.
+    // Arguments:
+    // - tab: the Tab to update the title for.
+    void TerminalPage::_UpdateTabIcon(Tab& tab)
+    {
+        const auto sourcePane = _SourceTerminalPaneForTab(tab.get_strong());
+        if (!sourcePane)
+        {
+            return;
+        }
+        if (const auto content{ sourcePane->GetContent() })
+        {
+            const auto icon = _AgentIconForControl(sourcePane->GetTerminalControl(), content.Icon());
+            const auto theme = _settings.GlobalSettings().CurrentTheme();
+            const auto iconStyle = (theme && theme.Tab()) ? theme.Tab().IconStyle() : IconStyle::Default;
+
+            tab.UpdateIcon(icon, iconStyle);
+        }
+    }
+
+    // Method Description:
+    // - Handle changes to the tab width set by the user
+    void TerminalPage::_UpdateTabWidthMode()
+    {
+        _tabView.TabWidthMode(_settings.GlobalSettings().TabWidthMode());
+    }
+
+    // Method Description:
+    // - Handle changes in tab layout.
+    void TerminalPage::_UpdateTabView()
+    {
+        if (_isVerticalLayout)
+        {
+            const auto railVisible = !_isInFocusMode &&
+                                     (!_isFullscreen || _showTabsFullscreen);
+            const auto tabsVisible = railVisible &&
+                                     ((_tabs.Size() > 1) ||
+                                      _settings.GlobalSettings().AlwaysShowTabs());
+            _tabStrip.TabsVisible(tabsVisible);
+            _SetVerticalRailVisibility(railVisible);
+            return;
+        }
+
+        // The tab row should only be visible if:
+        // - we're not in focus mode
+        // - we're not in full screen, or the user has enabled fullscreen tabs
+        // - there is more than one tab, or the user has chosen to always show tabs
+        const auto isVisible = !_isInFocusMode &&
+                               (!_isFullscreen || _showTabsFullscreen) &&
+                               (_hasTitlebarHost ||
+                                (_tabs.Size() > 1) ||
+                                _settings.GlobalSettings().AlwaysShowTabs());
+
+        if (_tabView)
+        {
+            // collapse/show the tabs themselves
+            _tabView.Visibility(isVisible ? Visibility::Visible : Visibility::Collapsed);
+        }
+        if (_tabRow)
+        {
+            _tabRow.Visibility(Visibility::Visible);
+            // collapse/show the row that the tabs are in.
+            // NaN is the special value XAML uses for "Auto" sizing.
+            _tabRow.Height(isVisible ? NAN : 0);
+        }
+    }
+
+    // Method Description:
+    // - Duplicates the current focused tab
+    void TerminalPage::_DuplicateFocusedTab()
+    {
+        if (const auto activeTab{ _GetFocusedTabImpl() })
+        {
+            _DuplicateTab(*activeTab);
+        }
+    }
+
+    // Method Description:
+    // - Duplicates specified tab
+    // Arguments:
+    // - tab: tab to duplicate
+    void TerminalPage::_DuplicateTab(const Tab& tab)
+    {
+        try
+        {
+            // TODO: GH#5047 - We're duplicating the whole profile, which might
+            // be a dangling reference to old settings.
+            //
+            // In the future, it may be preferable to just duplicate the
+            // current control's live settings (which will include changes
+            // made through VT).
+            uint32_t insertPosition = _tabs.Size();
+            if (_settings.GlobalSettings().NewTabPosition() == NewTabPosition::AfterCurrentTab)
+            {
+                insertPosition = tab.TabViewIndex() + 1;
+            }
+            _CreateNewTabFromPane(_MakePane(nullptr, tab, nullptr), insertPosition);
+
+            const auto runtimeTabText{ tab.GetTabText() };
+            if (!runtimeTabText.empty())
+            {
+                if (auto newTab{ _GetFocusedTabImpl() })
+                {
+                    newTab->SetTabText(runtimeTabText);
+                }
+            }
+        }
+        CATCH_LOG();
+    }
+
+    // Method Description:
+    // - Exports the content of the Terminal Buffer inside the tab
+    // Arguments:
+    // - tab: tab to export
+    safe_void_coroutine TerminalPage::_ExportTab(const Tab& tab, winrt::hstring filepath)
+    {
+        // This will be used to set up the file picker "filter", to select .txt
+        // files by default.
+        static constexpr COMDLG_FILTERSPEC supportedFileTypes[] = {
+            { L"Text Files (*.txt)", L"*.txt" },
+            { L"All Files (*.*)", L"*.*" }
+        };
+        // An arbitrary GUID to associate with all instances of this
+        // dialog, so they all re-open in the same path as they were
+        // open before:
+        static constexpr winrt::guid clientGuidExportFile{ 0xF6AF20BB, 0x0800, 0x48E6, { 0xB0, 0x17, 0xA1, 0x4C, 0xD8, 0x73, 0xDD, 0x58 } };
+
+        try
+        {
+            if (const auto control{ tab.GetActiveTerminalControl() })
+            {
+                auto path = filepath;
+
+                if (path.empty())
+                {
+                    // GH#11356 - we can't use the UWP apis for writing the file,
+                    // because they don't work elevated (shocker) So just use the
+                    // shell32 file picker manually.
+                    std::wstring filename{ tab.Title() };
+                    filename = til::clean_filename(filename);
+
+                    // GH#20188: yield before the dialog so that the Enter from the Command Palette doesn't leak into the terminal.
+                    // Low priority, so the Command Palette's close paints first.
+                    co_await wil::resume_foreground(Dispatcher(), CoreDispatcherPriority::Low);
+                    path = co_await SaveFilePicker(*_hostingHwnd, [filename = std::move(filename)](auto&& dialog) {
+                        THROW_IF_FAILED(dialog->SetClientGuid(clientGuidExportFile));
+                        try
+                        {
+                            // Default to the Downloads folder
+                            auto folderShellItem{ winrt::capture<IShellItem>(&SHGetKnownFolderItem, FOLDERID_Downloads, KF_FLAG_DEFAULT, nullptr) };
+                            dialog->SetDefaultFolder(folderShellItem.get());
+                        }
+                        CATCH_LOG(); // non-fatal
+                        THROW_IF_FAILED(dialog->SetFileTypes(ARRAYSIZE(supportedFileTypes), supportedFileTypes));
+                        THROW_IF_FAILED(dialog->SetFileTypeIndex(1)); // the array is 1-indexed
+                        THROW_IF_FAILED(dialog->SetDefaultExtension(L"txt"));
+
+                        // Default to using the tab title as the file name
+                        THROW_IF_FAILED(dialog->SetFileName((filename + L".txt").c_str()));
+                    });
+                }
+                else
+                {
+                    // The file picker isn't going to give us paths with
+                    // environment variables, but the user might have set one in
+                    // the settings. Expand those here.
+
+                    path = winrt::hstring{ wil::ExpandEnvironmentStringsW<std::wstring>(path.c_str()) };
+                }
+
+                if (!path.empty())
+                {
+                    const auto buffer = control.ReadEntireBuffer();
+                    til::io::write_utf8_string_to_file_atomic(std::filesystem::path{ std::wstring_view{ path } }, til::u16u8(buffer));
+                }
+            }
+        }
+        CATCH_LOG();
+    }
+
+    // Method Description:
+    // - Record the configuration information of the last closed thing .
+    // - Will occasionally prune the list so it doesn't grow infinitely.
+    // Arguments:
+    // - args: the list of actions to take to remake the pane/tab
+    void TerminalPage::_AddPreviouslyClosedPaneOrTab(std::vector<ActionAndArgs>&& args)
+    {
+        // Just make sure we don't get infinitely large, but still
+        // maintain a large replay buffer.
+        if (const auto size = _previouslyClosedPanesAndTabs.size(); size > 150)
+        {
+            const auto it = _previouslyClosedPanesAndTabs.begin();
+            // delete 50 at a time so that we don't have to do an erase
+            // of the buffer every time when at capacity.
+            _previouslyClosedPanesAndTabs.erase(it, it + (size - 100));
+        }
+
+        _previouslyClosedPanesAndTabs.emplace_back(args);
+    }
+
+    // Re-read the agent pane's identity from the tab, which is the single
+    // source of truth for it: `/agent` switches the running agent through
+    // `OnAgentSwitchRequested`, which updates the tab's override. Without this
+    // a save would persist whichever agent the pane was created with.
+    void TerminalPage::_RefreshAgentRestoreIdentity(Tab* const tab)
+    {
+        if (!tab)
+        {
+            return;
+        }
+
+        const auto agentContent = tab->FindAgentPaneContent();
+        if (!agentContent)
+        {
+            return;
+        }
+
+        winrt::get_self<implementation::AgentPaneContent>(agentContent)
+            ->SetAgentRestoreIdentity(_GetAgentPaneIdentity(tab), _GetAgentPaneCustomCommand(tab));
+    }
+
+    // Rewrites each shell pane that is running an agent CLI so its persisted
+    // command line resumes that conversation.
+    //
+    // This is the only agent metadata a save has to add. The agent pane needs
+    // none: it is an ordinary pane in the tree, so `BuildStartupActions`
+    // already emitted it with its split geometry, and
+    // `AgentPaneContent::GetNewTerminalArgs` already replaced its live helper
+    // command line with the stable resume form.
+    void TerminalPage::_StampAgentResumeCommandlines(std::vector<ActionAndArgs>& actions)
+    {
+        const auto getTerminalArgs = [](const ActionAndArgs& action) -> NewTerminalArgs {
+            INewContentArgs contentArgs{ nullptr };
+            if (const auto args = action.Args().try_as<NewTabArgs>())
+            {
+                contentArgs = args.ContentArgs();
+            }
+            else if (const auto args = action.Args().try_as<SplitPaneArgs>())
+            {
+                contentArgs = args.ContentArgs();
+            }
+
+            return contentArgs.try_as<NewTerminalArgs>();
+        };
+
+        for (const auto& action : actions)
+        {
+            const auto terminalArgs = getTerminalArgs(action);
+            if (!terminalArgs)
+            {
+                continue;
+            }
+
+            // The agent pane hosts a helper whose ACP session also shows up as
+            // that pane's binding. It already carries its own resume command
+            // line, so leaving it to be rewritten here would relaunch the same
+            // conversation a second time as a plain shell.
+            if (::Microsoft::Terminal::AgentPaneRestore::IsPaneType(terminalArgs.Type()))
+            {
+                continue;
+            }
+
+            const auto binding = _paneAgentSessions.find(terminalArgs.SessionId());
+            if (binding == _paneAgentSessions.end())
+            {
+                continue;
+            }
+
+            // Prefer rebuilding from the agent id: it is validated, while a
+            // command line handed to us by a hook is not. Fall back to the
+            // recorded one when we cannot spell the resume ourselves — an
+            // agent absent from `ResumeInvocations`, or a session id that
+            // fails validation — rather than dropping the binding entirely.
+            namespace Restore = ::Microsoft::Terminal::AgentPaneRestore;
+            auto resume = binding->second.agent.empty() ?
+                              winrt::hstring{} :
+                              winrt::hstring{ Restore::BuildResumeCommandline(
+                                  binding->second.agent,
+                                  binding->second.sessionId) };
+            if (resume.empty())
+            {
+                resume = binding->second.resumeCommandline;
+            }
+            if (!resume.empty())
+            {
+                terminalArgs.Commandline(resume);
+            }
+        }
+    }
+
+    void TerminalPage::_SaveWorkspaceIfNeeded()
+    {
+        const auto& windowName = _WindowProperties.WindowName();
+        if (!windowName.empty())
+        {
+            if (const auto layout = GetWindowLayout())
+            {
+                ApplicationState::SharedInstance().SaveWorkspace(windowName, layout);
+            }
+        }
+    }
+
+    // Method Description:
+    // - Removes the tab (both TerminalControl and XAML) after prompting for approval
+    // Arguments:
+    // - tab: the tab to remove
+    // - skipConfirmClose: if true, skip the confirmOnClose check. Used when
+    //   an aggregate confirmation has already been shown (i.e. close other tabs)
+    winrt::Windows::Foundation::IAsyncAction TerminalPage::_HandleCloseTabRequested(winrt::TerminalApp::Tab tab, bool skipConfirmClose)
+    {
+        winrt::com_ptr<TerminalPage> strong;
+
+        if (tab.ReadOnly())
+        {
+            const auto weak = get_weak();
+
+            auto warningResult = co_await _ShowCloseReadOnlyDialog();
+
+            strong = weak.get();
+
+            // If the user didn't explicitly click on close tab - leave
+            if (!strong || warningResult != ContentDialogResult::Primary)
+            {
+                co_return;
+            }
+        }
+
+        // Skip the per-tab confirmOnClose check when the caller has already
+        // shown an aggregate confirmation dialog (e.g. _RemoveTabs).
+        if (!skipConfirmClose)
+        {
+            const auto tabImpl = _GetTabImpl(tab);
+            if (tabImpl && _ShouldWarnOnCloseTab(tabImpl))
+            {
+                const auto weak = get_weak();
+
+                auto warningResult = co_await _ShowConfirmCloseDialog(ConfirmCloseDialogKind::Tab);
+                strong = weak.get();
+                if (!strong || warningResult != ContentDialogResult::Primary)
+                {
+                    co_return;
+                }
+            }
+        }
+
+        auto t = winrt::get_self<implementation::Tab>(tab);
+        auto actions = t->BuildStartupActions(BuildStartupKind::None);
+
+        // If this is the last tab in a named window, persist the workspace
+        // layout while tab content is still alive. After tab.Close() the pane
+        // content will be torn down by the time _RemoveTab runs.
+        if (_tabs.Size() == 1)
+        {
+            try
+            {
+                _SaveWorkspaceIfNeeded();
+            }
+            CATCH_LOG()
+        }
+
+        if (_KeepTabRunning(_GetTabImpl(tab)))
+        {
+            co_return;
+        }
+        if (!actions.empty())
+        {
+            _AddPreviouslyClosedPaneOrTab(std::move(actions));
+        }
+        tab.Close();
+    }
+
+    std::vector<winrt::TerminalApp::Tab> TerminalPage::_RuntimeTabs() const
+    {
+        std::vector<winrt::TerminalApp::Tab> result{ _tabs.begin(), _tabs.end() };
+        for (const auto& tab : _manager.KeptTabs(*this))
+        {
+            if (std::ranges::find(result, tab) == result.end())
+            {
+                result.emplace_back(tab);
+            }
+        }
+        return result;
+    }
+
+    bool TerminalPage::CanKeepTabRunning(const winrt::guid& tabId)
+    {
+        const auto tab = _FindTabByStableId(winrt::hstring{ ::Microsoft::Console::Utils::GuidToString(tabId) });
+        return tab && _GetTabIndex(*tab) && tab->CanKeepRunning();
+    }
+
+    bool TerminalPage::IsTabKeepRunning(const winrt::guid& tabId)
+    {
+        const auto tab = _FindTabByStableId(winrt::hstring{ ::Microsoft::Console::Utils::GuidToString(tabId) });
+        return tab && tab->KeepRunning();
+    }
+
+    void TerminalPage::SetTabKeepRunning(const winrt::guid& tabId, const bool enabled)
+    {
+        const auto tab = _FindTabByStableId(winrt::hstring{ ::Microsoft::Console::Utils::GuidToString(tabId) });
+        THROW_HR_IF(E_INVALIDARG, !tab || !_GetTabIndex(*tab));
+        THROW_HR_IF(E_ILLEGAL_METHOD_CALL, enabled && !CanKeepTabRunning(tabId));
+        const auto wasEnabled = tab->KeepRunning();
+        tab->KeepRunning(enabled);
+        if (enabled && !wasEnabled)
+        {
+            _LogKeepRunningMarked(tab);
+        }
+    }
+
+    std::pair<uint32_t, uint32_t> TerminalPage::_KeepRunningTabCounts() const
+    {
+        uint32_t totalTabCount = 0;
+        uint32_t keepRunningTabCount = 0;
+        for (const auto& candidate : _tabs)
+        {
+            if (const auto tab = _GetTabImpl(candidate); tab && tab->CanKeepRunning())
+            {
+                ++totalTabCount;
+                if (tab->KeepRunning())
+                {
+                    ++keepRunningTabCount;
+                }
+            }
+        }
+        return { totalTabCount, keepRunningTabCount };
+    }
+
+    void TerminalPage::_LogKeepRunningMarked(const winrt::com_ptr<Tab>& tab)
+    {
+        const auto [totalTabCount, keepRunningTabCount] = _KeepRunningTabCounts();
+        TraceLoggingWrite(
+            g_hTerminalAppProvider,
+            "KeepRunningMarked",
+            TraceLoggingWideString(tab->KeepRunningTelemetryId().c_str(), "KeepId"),
+            TraceLoggingBool(!!tab->FindAgentPaneContent(), "HasAgentPane"),
+            TraceLoggingUInt32(totalTabCount, "TotalTabCount"),
+            TraceLoggingUInt32(keepRunningTabCount, "KeepRunningTabCount"),
+            TraceLoggingKeyword(MICROSOFT_KEYWORD_MEASURES),
+            TelemetryPrivacyDataTag(PDT_ProductAndServiceUsage));
+    }
+
+    bool TerminalPage::_KeepTabRunning(const winrt::com_ptr<Tab>& tab)
+    {
+        if (!tab || !tab->KeepRunning() || !_GetTabIndex(*tab))
+        {
+            return false;
+        }
+        _manager.KeepTab(*this, *tab);
+        auto rollback = wil::scope_exit([&]() noexcept {
+            if (_GetTabIndex(*tab))
+            {
+                try
+                {
+                    const winrt::guid id{ tab->StableId() };
+                    _manager.BeginReattachKeptGroup(id);
+                    _manager.CompleteKeptGroupReattach(id, true);
+                    tab->GetRootPane()->WalkTree([&](const auto& pane) {
+                        if (const auto control = pane->GetTerminalControl())
+                        {
+                            control.WindowVisibilityChanged(_visible);
+                            control.OwningHwnd(_hostingHwnd ? reinterpret_cast<uint64_t>(*_hostingHwnd) : 0);
+                        }
+                    });
+                }
+                CATCH_LOG()
+            }
+        });
+        tab->Focus(FocusState::Unfocused);
+        tab->GetRootPane()->WalkTree([](const auto& pane) {
+            if (const auto control = pane->GetTerminalControl())
+            {
+                control.WindowVisibilityChanged(false);
+                control.OwningHwnd(0);
+            }
+        });
+        _RemoveTab(*tab, true, true);
+        rollback.release();
+        TraceLoggingWrite(
+            g_hTerminalAppProvider,
+            "KeepRunningDetached",
+            TraceLoggingWideString(tab->KeepRunningTelemetryId().c_str(), "KeepId"),
+            TraceLoggingBool(!!tab->FindAgentPaneContent(), "HasAgentPane"),
+            TraceLoggingKeyword(MICROSOFT_KEYWORD_MEASURES),
+            TelemetryPrivacyDataTag(PDT_ProductAndServiceUsage));
+        return true;
+    }
+
+    bool TerminalPage::RestoreKeptGroup(const winrt::guid& groupId)
+    {
+        const auto keepAlive = get_strong();
+        const auto owner = _manager.KeptGroupOwner(groupId);
+        THROW_HR_IF(E_INVALIDARG, !owner);
+        const auto sourceTab = _GetTabImpl(_manager.BeginReattachKeptGroup(groupId));
+        auto rollback = wil::scope_exit([&]() noexcept {
+            try
+            {
+                _manager.CompleteKeptGroupReattach(groupId, false);
+            }
+            CATCH_LOG()
+        });
+        const auto keepId = sourceTab->KeepRunningTelemetryId();
+        const auto hasAgentPane = !!sourceTab->FindAgentPaneContent();
+        const auto logReattach = [&](const char* outcome) {
+            TraceLoggingWrite(
+                g_hTerminalAppProvider,
+                "KeepRunningReattached",
+                TraceLoggingWideString(keepId.c_str(), "KeepId"),
+                TraceLoggingString(outcome, "Outcome"),
+                TraceLoggingBool(hasAgentPane, "HasAgentPane"),
+                TraceLoggingKeyword(MICROSOFT_KEYWORD_MEASURES),
+                TelemetryPrivacyDataTag(PDT_ProductAndServiceUsage));
+        };
+        bool attached = false;
+        try
+        {
+            auto actions = winrt::single_threaded_vector(sourceTab->BuildStartupActions(BuildStartupKind::Content));
+            attached = _AttachTransferredContent(*winrt::get_self<TerminalPage>(owner), sourceTab, sourceTab->GetRootPane(), actions, -1);
+        }
+        catch (...)
+        {
+            rollback.reset();
+            logReattach("failed");
+            throw;
+        }
+        if (!attached)
+        {
+            rollback.reset();
+            logReattach("failed");
+            return false;
+        }
+        _manager.CompleteKeptGroupReattach(groupId, true);
+        rollback.release();
+        logReattach("live");
+        const auto restoredTab = _GetFocusedTabImpl();
+        if (hasAgentPane)
+        {
+            try
+            {
+                Json::Value params;
+                params["tab_id"] = winrt::to_string(restoredTab->StableId());
+                params["window_id"] = std::to_string(_WindowProperties.WindowId());
+                _RaiseProtocolEvent("keep_running_reattached", params);
+            }
+            CATCH_LOG()
+        }
+        _GetFocusedTabImpl()->GetRootPane()->WalkTree([&](const auto& pane) {
+            const auto control = pane->GetTerminalControl();
+            const auto binding = control ? _manager.AgentSessionEvent(control.ContentId()) : winrt::hstring{};
+            if (!binding.empty())
+            {
+                OnPaneAgentSessionChanged(binding);
+            }
+        });
+        return true;
+    }
+
+    // Removes the tab (both TerminalControl and XAML).
+    // NOTE: Don't call this directly, but rather `tab.Close()`.
+    // - movingAway: true when this _RemoveTab is the tail of a cross-window
+    //   move (the tab's terminal content is being reattached in another
+    //   window via ContentId).
+    void TerminalPage::_RemoveTab(const winrt::TerminalApp::Tab& tab, bool movingAway, bool keepAlive)
+    {
+        uint32_t tabIndex{};
+        if (!_tabs.IndexOf(tab, tabIndex))
+        {
+            const auto impl = _GetTabImpl(tab);
+            if (impl && _manager.KeptGroupOwner(winrt::guid{ impl->StableId() }) == *this)
+            {
+                if (movingAway)
+                {
+                    tab.Shutdown();
+                }
+                else
+                {
+                    _manager.DiscardKeptGroup(winrt::guid{ impl->StableId() });
+                }
+            }
+            return;
+        }
+
+        // We use _removing flag to suppress _OnTabSelectionChanged events
+        // that might get triggered while removing
+        _removing = true;
+        auto unsetRemoving = wil::scope_exit([&]() noexcept { _removing = false; });
+
+        const auto focusedTabIndex{ _GetFocusedTabIndex() };
+
+        // Capture the stable id before Shutdown clears state, then tell wta
+        // to drop the matching TabSession so a future tab that reuses any
+        // index slot starts with a clean conversation.
+        winrt::hstring closedTabStableId{};
+        std::shared_ptr<Pane> rootPaneForClose{};
+        if (const auto tabImpl = _GetTabImpl(tab))
+        {
+            closedTabStableId = tabImpl->StableId();
+
+            rootPaneForClose = tabImpl->GetRootPane();
+        }
+
+        // Notify wta of every terminal pane in this tab BEFORE
+        // `tab.Shutdown()` destroys their controls. Tab shutdown goes
+        // through `Pane::Shutdown` -> `_setPaneContent(nullptr)` which
+        // doesn't fire `Pane::Closed` and doesn't drive the connection
+        // through its Closed state with our listener attached, so the
+        // normal ConnectionStateChanged bridge never emits
+        // `connection_state:closed`. Explicit emit here is what lets
+        // wta demote agent-session rows bound to the tab's panes to
+        // Ended on tab close (the `_HandleClosePaneRequested`
+        // counterpart covers single-pane Ctrl+Shift+W).
+        //
+        // Skipped for `movingAway` — a cross-window tab drag is NOT a
+        // close: the tab's panes are reattached in the target window via
+        // ContentId, keeping the same connection `SessionId`. Emitting
+        // `connection_state:closed` here would send wta a `PaneClosed`
+        // for those (still-live) panes, flipping any agent session bound
+        // to them (e.g. a `copilot` CLI a user ran in a shell pane) to
+        // Ended/Historical even though the session is alive in the new
+        // window. The registry is shared master-side across every window
+        // in this WT process, so the moved session stays Live for both
+        // the old and new window when we don't fire this. Mirrors the
+        // `movingAway` guard on `_NotifyAgentTabClosed` below.
+        if (!movingAway)
+        {
+            _NotifyPanesClosing(rootPaneForClose);
+        }
+        _ReleaseRichTabAttachments(rootPaneForClose);
+
+        // NOTE: Workspace persistence for named windows used to live here,
+        // but by the time _RemoveTab runs the pane content may already be
+        // torn down (e.g. from the close-pane path). Instead, workspace
+        // saves are handled earlier:
+        //  - Close-pane (last pane): in _HandleClosePaneRequested
+        //  - Close-tab: in _HandleCloseTabRequested
+
+        if (!movingAway)
+        {
+            // Notify WTA while the agent helper is still alive. Shutdown tears down the
+            // helper's ConPTY process, so emitting this afterwards races session/close
+            // against process termination and leaves the ACP session orphaned.
+            _NotifyAgentTabClosed(closedTabStableId);
+        }
+
+        // Removing the tab from the collection should destroy its control and disconnect its connection,
+        // but it doesn't always do so. The UI tree may still be holding the control and preventing its destruction.
+        if (!keepAlive)
+        {
+            tab.Shutdown();
+        }
+        else
+        {
+            uint32_t contentIndex{};
+            if (_tabContent.Children().IndexOf(tab.Content(), contentIndex))
+            {
+                _tabContent.Children().RemoveAt(contentIndex);
+            }
+        }
+
+        uint32_t mruIndex{};
+        if (_mruTabs.IndexOf(tab, mruIndex))
+        {
+            _mruTabs.RemoveAt(mruIndex);
+        }
+
+        if (tab == _settingsTab)
+        {
+            _settingsTab = nullptr;
+        }
+
+        if (_stashed.draggedTab && *_stashed.draggedTab == tab)
+        {
+            _stashed.draggedTab = nullptr;
+        }
+
+        _tabs.RemoveAt(tabIndex);
+        uint32_t itemIndex{};
+        if (_tabItems().IndexOf(tab.TabViewItem(), itemIndex))
+        {
+            _tabItems().RemoveAt(itemIndex);
+        }
+        _UpdateTabIndices();
+
+        // To close the window here, we need to close the hosting window.
+        if (_tabs.Size() == 0)
+        {
+            // If we are supposed to save state, make sure we clear it out
+            // if the user manually closed all tabs.
+            // Do this only if we are the last window; the monarch will notice
+            // we are missing and remove us that way otherwise.
+            if (!_windowCloseAccepted && !_restoringStartupKeptGroups)
+            {
+                CloseWindowRequested.raise(*this, nullptr);
+            }
+        }
+        else if (focusedTabIndex.has_value() && focusedTabIndex.value() == gsl::narrow_cast<uint32_t>(tabIndex))
+        {
+            // Manually select the new tab to get focus, rather than relying on TabView since:
+            // 1. We want to customize this behavior (e.g., use MRU logic)
+            // 2. In fullscreen (GH#5799) and focus (GH#7916) modes the _OnTabItemsChanged is not fired
+            // 3. When rearranging tabs (GH#7916) _OnTabItemsChanged is suppressed
+
+            const auto newSelectedTab = _mruTabs.GetAt(0);
+            _UpdatedSelectedTab(newSelectedTab);
+            _selectedTabItem(newSelectedTab.TabViewItem());
+
+            // Flush any deferred agent settings rebuild now that a
+            // terminal tab is active. Per-tab model — no shared pane
+            // reconciliation needed.
+            _FlushPendingAgentSettingsReconciliation();
+        }
+
+        // GH#5559 - If we were in the middle of a drag/drop, end it by clearing
+        // out our state.
+        if (_rearranging)
+        {
+            _rearranging = false;
+            _rearrangeFrom = std::nullopt;
+            _rearrangeTo = std::nullopt;
+            _tabDragReorderAuthorized = false;
+            _tabDragSelectedItem = nullptr;
+            winrt::get_self<implementation::TabStrip>(_tabStrip)->ProjectionControlsEnabled(true);
+            _ApplyTabListProjection();
+        }
+    }
+
+    // Method Description:
+    // - Sets focus to the tab to the right or left the currently selected tab.
+    void TerminalPage::_SelectNextTab(const bool bMoveRight, const Windows::Foundation::IReference<Microsoft::Terminal::Settings::Model::TabSwitcherMode>& customTabSwitcherMode)
+    {
+        const auto index{ _GetFocusedTabIndex().value_or(0) };
+        const auto tabSwitchMode = customTabSwitcherMode ? customTabSwitcherMode.Value() : _settings.GlobalSettings().TabSwitcherMode();
+        if (tabSwitchMode == TabSwitcherMode::Disabled)
+        {
+            auto tabCount = _tabs.Size();
+            // Wraparound math. By adding tabCount and then calculating
+            // modulo tabCount, we clamp the values to the range [0,
+            // tabCount) while still supporting moving leftward from 0 to
+            // tabCount - 1.
+            const auto newTabIndex = ((tabCount + index + (bMoveRight ? 1 : -1)) % tabCount);
+            _SelectTab(newTabIndex);
+        }
+        else
+        {
+            const auto p = LoadCommandPalette();
+            p.SetTabs(_tabs, _mruTabs);
+
+            // Otherwise, set up the tab switcher in the selected mode, with
+            // the given ordering, and make it visible.
+            p.EnableTabSwitcherMode(index, tabSwitchMode);
+            p.Visibility(Visibility::Visible);
+            p.SelectNextItem(bMoveRight);
+        }
+    }
+
+    // Method Description:
+    // - Sets focus to the desired tab. Returns false if the provided tabIndex
+    //   is greater than the number of tabs we have.
+    // - During startup, we'll immediately set the selected tab as focused.
+    // - After startup, we'll dispatch an async method to set the selected
+    //   item of the TabView, which will then also trigger a
+    //   TabView::SelectionChanged, handled in
+    //   TerminalPage::_OnTabSelectionChanged
+    // Return Value:
+    // true iff we were able to select that tab index, false otherwise
+    bool TerminalPage::_SelectTab(uint32_t tabIndex)
+    {
+        // GH#9369 - if the argument is out of range, then clamp to the number
+        // of available tabs. Previously, we'd just silently do nothing if the
+        // value was greater than the number of tabs.
+        tabIndex = std::clamp(tabIndex, 0u, _tabs.Size() - 1);
+
+        auto tab{ _tabs.GetAt(tabIndex) };
+        // GH#11107 - Always just set the item directly first so that if
+        // tab movement is done as part of multiple actions following calls
+        // to _GetFocusedTab will return the correct tab.
+        _selectedTabItem(tab.TabViewItem());
+
+        if (_startupState == StartupState::InStartup)
+        {
+            _UpdatedSelectedTab(tab);
+        }
+        else
+        {
+            _SetFocusedTab(tab);
+        }
+
+        return true;
+    }
+
+    // Method Description:
+    // - This method is called once a tab was selected in tab switcher
+    //   We'll use this event to select the relevant tab
+    // Arguments:
+    // - tab - tab to select
+    // Return Value:
+    // - <none>
+    void TerminalPage::_OnSwitchToTabRequested(const IInspectable& /*sender*/, const winrt::TerminalApp::Tab& tab)
+    {
+        uint32_t index{};
+        if (_tabs.IndexOf(tab, index))
+        {
+            _SelectTab(index);
+        }
+    }
+
+    // Spec A §4.1 routing helpers. See TerminalPage.h for context. Phase 2
+    // forwards unconditionally to _tabView; Phase 3 flips the vertical branch
+    // to _tabStrip once TabStrip is populated with real Tab objects.
+    IVector<IInspectable> TerminalPage::_tabItems() const
+    {
+        // Phase 3: real branching. TabStrip.TabItems is an IObservableVector,
+        // which derives from IVector, so the return-type conversion is safe.
+        if (_isVerticalLayout)
+        {
+            return _tabStrip.TabItems().as<IVector<IInspectable>>();
+        }
+        return _tabView.TabItems();
+    }
+
+    bool TerminalPage::_IsActiveTabControl(const IInspectable& sender) const noexcept
+    {
+        if (!sender)
+        {
+            return false;
+        }
+
+        return _isVerticalLayout ?
+                   winrt::get_abi(sender) == winrt::get_abi(_tabStrip) :
+                   winrt::get_abi(sender) == winrt::get_abi(_tabView);
+    }
+
+    IInspectable TerminalPage::_selectedTabItem() const
+    {
+        if (_changingTabLayout && _tabLayoutTransitionSelectedItem)
+        {
+            return _tabLayoutTransitionSelectedItem;
+        }
+        if (_isVerticalLayout)
+        {
+            return _tabStrip.SelectedItem();
+        }
+        return _tabView.SelectedItem().try_as<MUX::Controls::TabViewItem>();
+    }
+
+    void TerminalPage::_selectedTabItem(const IInspectable& item)
+    {
+        if (_isVerticalLayout)
+        {
+            _tabStrip.SelectedItem(item);
+        }
+        else
+        {
+            _tabView.SelectedItem(item);
+        }
+    }
+
+    // Method Description:
+    // - Returns the index in our list of tabs of the currently focused tab. If
+    //      no tab is currently selected, returns nullopt.
+    // Return Value:
+    // - the index of the currently focused tab if there is one, else nullopt
+    std::optional<uint32_t> TerminalPage::_GetFocusedTabIndex() const noexcept
+    {
+        if (_changingTabLayout && _tabLayoutTransitionSelectedItem)
+        {
+            for (uint32_t index = 0; index < _tabs.Size(); ++index)
+            {
+                if (winrt::get_abi(_tabs.GetAt(index).TabViewItem()) == winrt::get_abi(_tabLayoutTransitionSelectedItem))
+                {
+                    return index;
+                }
+            }
+            return std::nullopt;
+        }
+
+        // GH#1117: This is a workaround because _tabView.SelectedIndex()
+        //          sometimes return incorrect result after removing some tabs
+        uint32_t focusedIndex;
+        if (_tabItems().IndexOf(_selectedTabItem(), focusedIndex))
+        {
+            return focusedIndex;
+        }
+        return std::nullopt;
+    }
+
+    // Method Description:
+    // - Returns the index in our list of tabs of the currently focused tab. If
+    //      no tab is currently selected, returns nullopt.
+    // Return Value:
+    // - the index of the currently focused tab if there is one, else nullopt
+    std::optional<uint32_t> TerminalPage::_GetTabIndex(const TerminalApp::Tab& tab) const noexcept
+    {
+        uint32_t i;
+        if (_tabs.IndexOf(tab, i))
+        {
+            return i;
+        }
+        return std::nullopt;
+    }
+
+    // Method Description:
+    // - returns the currently focused tab. This might return null,
+    //   so make sure to check the result!
+    winrt::TerminalApp::Tab TerminalPage::_GetFocusedTab() const noexcept
+    {
+        if (auto index{ _GetFocusedTabIndex() })
+        {
+            return _tabs.GetAt(*index);
+        }
+        return nullptr;
+    }
+
+    // Method Description:
+    // - returns a com_ptr to the currently focused tab implementation. This might return null,
+    //   so make sure to check the result!
+    winrt::com_ptr<Tab> TerminalPage::_GetFocusedTabImpl() const noexcept
+    {
+        if (auto tab{ _GetFocusedTab() })
+        {
+            return _GetTabImpl(tab);
+        }
+        return nullptr;
+    }
+
+    // Method Description:
+    // - returns a tab corresponding to a view item. This might return null,
+    //   so make sure to check the result!
+    winrt::TerminalApp::Tab TerminalPage::_GetTabByTabViewItem(const IInspectable& tabViewItem) const noexcept
+    {
+        uint32_t tabIndexFromControl{};
+        const auto items{ _tabItems() };
+        if (items.IndexOf(tabViewItem, tabIndexFromControl) && tabIndexFromControl < _tabs.Size())
+        {
+            // If IndexOf returns true, we've actually got an index
+            return _tabs.GetAt(tabIndexFromControl);
+        }
+        return nullptr;
+    }
+
+    // Method Description:
+    // - An async method for changing the focused tab on the UI thread. This
+    //   method will _only_ set the selected item of the TabView, which will
+    //   then also trigger a TabView::SelectionChanged event, which we'll handle
+    //   in TerminalPage::_OnTabSelectionChanged, where we'll mark the new tab
+    //   as focused.
+    // Arguments:
+    // - tab: tab to focus.
+    // Return Value:
+    // - <none>
+    safe_void_coroutine TerminalPage::_SetFocusedTab(const winrt::TerminalApp::Tab tab)
+    {
+        // GH#1117: This is a workaround because _tabView.SelectedIndex(tabIndex)
+        //          sometimes set focus to an incorrect tab after removing some tabs
+        auto weakThis{ get_weak() };
+
+        if (!_tabView.Dispatcher().HasThreadAccess())
+        {
+            co_await winrt::resume_foreground(_tabView.Dispatcher());
+        }
+
+        if (auto page{ weakThis.get() })
+        {
+            // Make sure the tab was not removed
+            uint32_t tabIndex{};
+            if (_tabs.IndexOf(tab, tabIndex))
+            {
+                _selectedTabItem(tab.TabViewItem());
+            }
+        }
+    }
+
+    // Method Description:
+    // - Disables read-only mode on pane if the user wishes to close it and read-only mode is enabled.
+    // Arguments:
+    // - pane: the pane that is about to be closed.
+    // Return Value:
+    // - bool indicating whether the (read-only) pane can be closed.
+    winrt::Windows::Foundation::IAsyncOperation<bool> TerminalPage::_PaneConfirmCloseReadOnly(std::shared_ptr<Pane> pane)
+    {
+        if (pane->ContainsReadOnly())
+        {
+            const auto weak = get_weak();
+
+            auto warningResult = co_await _ShowCloseReadOnlyDialog();
+
+            const auto strong = weak.get();
+
+            // If the user didn't explicitly click on close tab - leave
+            if (!strong || warningResult != ContentDialogResult::Primary)
+            {
+                co_return false;
+            }
+
+            // Clean read-only mode to prevent additional prompt if closing the pane triggers closing of a hosting tab
+            pane->WalkTree([](const auto& p) {
+                if (const auto control{ p->GetTerminalControl() })
+                {
+                    if (control.ReadOnly())
+                    {
+                        control.ToggleReadOnly();
+                    }
+                }
+            });
+        }
+        co_return true;
+    }
+
+    // Method Description:
+    // - Removes the pane from the tab it belongs to.
+    // Arguments:
+    // - pane: the pane to close.
+    void TerminalPage::_HandleClosePaneRequested(std::shared_ptr<Pane> pane)
+    {
+        // Build the list of actions to recreate the closed pane,
+        // BuildStartupActions returns the "first" pane and the rest of
+        // its actions are assuming that first pane has been created first.
+        // This doesn't handle refocusing anything in particular, the
+        // result will be that the last pane created is focused. In the
+        // case of a single pane that is the desired behavior anyways.
+        auto state = pane->BuildStartupActions(0, 1, BuildStartupKind::None);
+        {
+            ActionAndArgs splitPaneAction{};
+            splitPaneAction.Action(ShortcutAction::SplitPane);
+            SplitPaneArgs splitPaneArgs{ SplitDirection::Automatic, state.firstPane->GetTerminalArgsForPane(BuildStartupKind::None) };
+            splitPaneAction.Args(splitPaneArgs);
+
+            state.args.emplace(state.args.begin(), std::move(splitPaneAction));
+        }
+        _AddPreviouslyClosedPaneOrTab(std::move(state.args));
+
+        winrt::com_ptr<Tab> owningTab;
+        for (const auto& tab : _RuntimeTabs())
+        {
+            const auto tabImpl = _GetTabImpl(tab);
+            if (!tabImpl)
+            {
+                continue;
+            }
+
+            if (const auto rootPane = tabImpl->GetRootPane())
+            {
+                rootPane->WalkTree([&](const std::shared_ptr<Pane>& candidate) {
+                    if (candidate == pane)
+                    {
+                        owningTab = tabImpl;
+                    }
+                });
+            }
+            if (owningTab)
+            {
+                break;
+            }
+        }
+
+        const auto isLastPane = owningTab && owningTab->GetLeafPaneCount() == 1;
+        if (owningTab && pane->IsAgentPane())
+        {
+            owningTab->SuppressAgentPrewarm();
+        }
+
+        // If this is the last pane on the last tab of a named window, persist
+        // the workspace while the pane content is still alive.
+        if (isLastPane && _tabs.Size() == 1)
+        {
+            try
+            {
+                _SaveWorkspaceIfNeeded();
+            }
+            CATCH_LOG()
+        }
+
+        // Notify wta of pane closure BEFORE destruction (see
+        // `_NotifyPanesClosing` for the revoker-race rationale). Must
+        // happen before `pane->Close()` since Close destroys the
+        // TermControl and the SessionId becomes unresolvable.
+        _NotifyPanesClosing(pane);
+        _ReleaseRichTabAttachments(pane);
+
+        pane->Close();
+    }
+
+    // Method Description:
+    // - Close the currently focused pane. If the pane is the last pane in the
+    //   tab, the tab will also be closed. This will happen when we handle the
+    //   tab's Closed event.
+    safe_void_coroutine TerminalPage::_CloseFocusedPane()
+    {
+        if (const auto activeTab{ _GetFocusedTabImpl() })
+        {
+            _UnZoomIfNeeded();
+
+            if (const auto pane{ activeTab->GetActivePane() })
+            {
+                const auto weak = get_weak();
+
+                // Check if we should warn before closing a single pane
+                // (only triggers on Always — Automatic doesn't warn for single pane)
+                const auto setting = _settings.GlobalSettings().ConfirmOnClose();
+                if (setting == ConfirmOnClose::Always)
+                {
+                    // If this is the last pane, closing it closes the tab,
+                    // so use the tab dialog text instead.
+                    const auto kind = activeTab->GetLeafPaneCount() == 1 ? ConfirmCloseDialogKind::Tab : ConfirmCloseDialogKind::Pane;
+                    auto warningResult = co_await _ShowConfirmCloseDialog(kind);
+
+                    // Hold a strong reference to `this` for the rest of the
+                    // method; we may be the last holder after `co_await`.
+                    auto strong = weak.get();
+                    if (!strong || warningResult != ContentDialogResult::Primary)
+                    {
+                        co_return;
+                    }
+
+                }
+
+                if (co_await _PaneConfirmCloseReadOnly(pane))
+                {
+                    if (const auto strong = weak.get())
+                    {
+                        _HandleClosePaneRequested(pane);
+                    }
+                }
+            }
+        }
+    }
+
+    safe_void_coroutine TerminalPage::_ClosePaneFromTabStrip(TerminalApp::TabStripPaneEventArgs args)
+    {
+        const auto weakThis = get_weak();
+        if (!args || _changingTabLayout)
+        {
+            co_return;
+        }
+
+        const auto projectedTab = _GetTabByTabViewItem(args.Tab());
+        const auto originalTab = projectedTab ? _GetTabImpl(projectedTab) : nullptr;
+        if (!originalTab)
+        {
+            co_return;
+        }
+
+        const auto stableId = originalTab->StableId();
+        const auto contentId = args.ContentId();
+        const auto pendingKey = std::wstring{ stableId } + L":" + std::to_wstring(contentId);
+        if (!_pendingTabStripPaneCloses.emplace(pendingKey).second)
+        {
+            co_return;
+        }
+        auto clearPending = wil::scope_exit([weakThis, pendingKey]() {
+            if (const auto page = weakThis.get())
+            {
+                page->_pendingTabStripPaneCloses.erase(pendingKey);
+            }
+        });
+
+        const auto resolveTab = [stableId](const auto& page) -> winrt::com_ptr<Tab> {
+            for (const auto& candidate : page->_tabs)
+            {
+                if (const auto tab = page->_GetTabImpl(candidate); tab && tab->StableId() == stableId)
+                {
+                    return tab;
+                }
+            }
+            return nullptr;
+        };
+
+        auto tab = resolveTab(this);
+        auto closeScope = tab ? tab->GetPaneCloseScope(contentId) : std::vector<std::shared_ptr<Pane>>{};
+        if (closeScope.empty())
+        {
+            co_return;
+        }
+
+        if (_settings.GlobalSettings().ConfirmOnClose() == ConfirmOnClose::Always)
+        {
+            const auto closesWholeTab = closeScope.size() >= gsl::narrow_cast<size_t>(tab->GetLeafPaneCount());
+            const auto warningResult = co_await _ShowConfirmCloseDialog(closesWholeTab ? ConfirmCloseDialogKind::Tab : ConfirmCloseDialogKind::Pane);
+            const auto strong = weakThis.get();
+            if (!strong || warningResult != ContentDialogResult::Primary)
+            {
+                co_return;
+            }
+            tab = resolveTab(strong);
+            closeScope = tab ? tab->GetPaneCloseScope(contentId) : std::vector<std::shared_ptr<Pane>>{};
+            if (closeScope.empty())
+            {
+                co_return;
+            }
+        }
+
+        const auto containsReadOnly = std::ranges::any_of(closeScope, [](const auto& pane) {
+            return pane->ContainsReadOnly();
+        });
+        if (containsReadOnly)
+        {
+            auto strongBeforeDialog = weakThis.get();
+            if (!strongBeforeDialog)
+            {
+                co_return;
+            }
+            const auto warningOperation = strongBeforeDialog->_ShowCloseReadOnlyDialog();
+            strongBeforeDialog = nullptr;
+            const auto warningResult = co_await warningOperation;
+            const auto strong = weakThis.get();
+            if (!strong || warningResult != ContentDialogResult::Primary)
+            {
+                co_return;
+            }
+            tab = resolveTab(strong);
+            closeScope = tab ? tab->GetPaneCloseScope(contentId) : std::vector<std::shared_ptr<Pane>>{};
+            if (closeScope.empty())
+            {
+                co_return;
+            }
+            for (const auto& scopePane : closeScope)
+            {
+                scopePane->WalkTree([](const auto& pane) {
+                    if (const auto control = pane->GetTerminalControl(); control && control.ReadOnly())
+                    {
+                        control.ToggleReadOnly();
+                    }
+                });
+            }
+        }
+
+        const auto strong = weakThis.get();
+        if (strong && tab && tab->GetRootPane())
+        {
+            if (const auto target = tab->GetRootPane()->FindPaneByContentId(contentId))
+            {
+                strong->_HandleClosePaneRequested(target);
+            }
+        }
+    }
+
+    // Method Description:
+    // - Close all panes with the given IDs sequentially.
+    // - Shows a single aggregate confirmation dialog upfront if the confirmOnClose setting warrants it.
+    // Arguments:
+    // - weakTab: weak reference to the tab that the panes belong to.
+    // - paneIds: collection of the IDs of the panes that are marked for removal.
+    safe_void_coroutine TerminalPage::_ClosePanes(weak_ref<Tab> weakTab, std::vector<uint32_t> paneIds)
+    {
+        // Show a single aggregate confirmation for closing multiple panes.
+        if (_settings.GlobalSettings().ConfirmOnClose() != ConfirmOnClose::Never)
+        {
+            const auto weak = get_weak();
+            auto warningResult = co_await _ShowConfirmCloseDialog(ConfirmCloseDialogKind::MultiplePanes);
+
+            // Hold a strong reference to `this` after the co_await; we may
+            // be the last holder if the page was being torn down.
+            auto strong = weak.get();
+            if (!strong || warningResult != ContentDialogResult::Primary)
+            {
+                co_return;
+            }
+        }
+        _CloseRemainingPanes(weakTab, std::move(paneIds));
+    }
+
+    // Method Description:
+    // - Recursively closes panes by ID, chaining each close via the
+    //   ClosedByParent callback. Called after confirmation has already
+    //   been handled by _ClosePanes.
+    // Arguments:
+    // - weakTab: weak reference to the tab that the panes belong to
+    // - paneIds: remaining pane IDs to close
+    void TerminalPage::_CloseRemainingPanes(weak_ref<Tab> weakTab, std::vector<uint32_t> paneIds)
+    {
+        if (auto strongTab{ weakTab.get() })
+        {
+            // Close all unfocused panes one by one
+            while (!paneIds.empty())
+            {
+                const auto id = paneIds.back();
+                paneIds.pop_back();
+
+                if (const auto pane{ strongTab->GetRootPane()->FindPane(id) })
+                {
+                    pane->ClosedByParent([ids{ std::move(paneIds) }, weakThis{ get_weak() }, weakTab]() {
+                        if (auto strongThis{ weakThis.get() })
+                        {
+                            strongThis->_CloseRemainingPanes(weakTab, std::move(ids));
+                        }
+                    });
+                    // Close the pane which will eventually trigger the closed by parent event
+                    _HandleClosePaneRequested(pane);
+                    break;
+                }
+            }
+        }
+    }
+
+    // Method Description:
+    // - Close the tab at the given index.
+    void TerminalPage::_CloseTabAtIndex(uint32_t index)
+    {
+        if (index >= _tabs.Size())
+        {
+            return;
+        }
+        if (auto tab{ _tabs.GetAt(index) })
+        {
+            _HandleCloseTabRequested(tab);
+        }
+    }
+
+    // Method Description:
+    // - Closes provided tabs one by one
+    // - Shows a single aggregate confirmation dialog upfront if the confirmOnClose setting warrants it.
+    // Arguments:
+    // - tabs - tabs to remove
+    safe_void_coroutine TerminalPage::_RemoveTabs(const std::vector<winrt::TerminalApp::Tab> tabs)
+    {
+        if (tabs.empty())
+        {
+            co_return;
+        }
+
+        // Show a single aggregate confirmation instead of per-tab dialogs.
+        const auto weak = get_weak();
+        if (_settings.GlobalSettings().ConfirmOnClose() != ConfirmOnClose::Never)
+        {
+            auto warningResult = co_await _ShowConfirmCloseDialog(ConfirmCloseDialogKind::MultipleTabs);
+
+            // Hold a strong reference to `this` after the co_await so that
+            // the for-loop below can safely dispatch on us.
+            auto strong = weak.get();
+            if (!strong || warningResult != ContentDialogResult::Primary)
+            {
+                co_return;
+            }
+        }
+
+        for (auto& tab : tabs)
+        {
+            winrt::Windows::Foundation::IAsyncAction action{ nullptr };
+            if (const auto strong = weak.get())
+            {
+                action = _HandleCloseTabRequested(tab, /*skipConfirmClose*/ true);
+            }
+
+            if (!action)
+            {
+                co_return;
+            }
+
+            co_await action;
+        }
+    }
+    // Method Description:
+    // - Responds to changes in the TabView's item list by changing the
+    //   tabview's visibility.
+    // - This method is also invoked when tabs are dragged / dropped as part of
+    //   tab reordering and this method hands that case as well in concert with
+    //   TabDragStarting and TabDragCompleted handlers that are set up in
+    //   TerminalPage::Create()
+    // Arguments:
+    // - sender: the control that originated this event
+    // - eventArgs: the event's constituent arguments
+    void TerminalPage::_OnTabItemsChanged(const IInspectable& sender, const Windows::Foundation::Collections::IVectorChangedEventArgs& eventArgs)
+    {
+        if (_changingTabLayout || !_IsActiveTabControl(sender))
+        {
+            return;
+        }
+
+        if (_rearranging)
+        {
+            if (eventArgs.CollectionChange() == Windows::Foundation::Collections::CollectionChange::ItemRemoved)
+            {
+                _rearrangeFrom = eventArgs.Index();
+            }
+
+            if (eventArgs.CollectionChange() == Windows::Foundation::Collections::CollectionChange::ItemInserted)
+            {
+                _rearrangeTo = eventArgs.Index();
+            }
+        }
+
+        if (_mutatingTabCollections)
+        {
+            return;
+        }
+
+        if (const auto p = CommandPaletteElement())
+        {
+            p.Visibility(Visibility::Collapsed);
+        }
+        _UpdateTabView();
+        if (!_rearranging &&
+            eventArgs.CollectionChange() == Windows::Foundation::Collections::CollectionChange::ItemInserted &&
+            eventArgs.Index() < _tabs.Size())
+        {
+            _ApplyTabListProjection(_tabs.GetAt(eventArgs.Index()));
+        }
+        else
+        {
+            _ApplyTabListProjection();
+        }
+    }
+
+    void TerminalPage::_OnTabPointerPressed(const IInspectable& sender, const Windows::UI::Xaml::Input::PointerRoutedEventArgs& e)
+    {
+        const auto point = e.GetCurrentPoint(nullptr);
+        if (_IsCollapsedVerticalRail() &&
+            e.Pointer().PointerDeviceType() == Windows::Devices::Input::PointerDeviceType::Mouse &&
+            !point.Properties().IsLeftButtonPressed())
+        {
+            e.Handled(true);
+            return;
+        }
+
+        if (_changingTabLayout ||
+            ((!_isVerticalLayout && !_tabItemMiddleClickHookEnabled) ||
+             !point.Properties().IsMiddleButtonPressed()))
+        {
+            return;
+        }
+
+        const auto tabViewItem = sender.try_as<MUX::Controls::TabViewItem>();
+        if (!tabViewItem || !tabViewItem.CapturePointer(e.Pointer()))
+        {
+            return;
+        }
+
+        _tabItemMiddleClickExited = false;
+
+        _tabItemMiddleClickPointerEntered = tabViewItem.PointerEntered(winrt::auto_revoke, [this](auto&&, auto&& e) {
+            _tabItemMiddleClickExited = false;
+            e.Handled(true);
+        });
+        _tabItemMiddleClickPointerExited = tabViewItem.PointerExited(winrt::auto_revoke, [this](auto&&, auto&& e) {
+            _tabItemMiddleClickExited = true;
+            e.Handled(true);
+        });
+        _tabItemMiddleClickPointerCaptureLost = tabViewItem.PointerCaptureLost(winrt::auto_revoke, [this](auto&& sender, auto&& e) {
+            // The WinUI TabView calls CapturePointer() internally and it's not reference counted,
+            // so when it calls ReleasePointerCapture() in its PointerReleased handler,
+            // we get a PointerCaptureLost before we receive the PointerReleased event.
+            // This makes typical handling of PointerReleased events on our side difficult.
+            // Well, whatever, now we just hook PointerCaptureLost because we know WinUI will trigger it.
+
+            _tabItemMiddleClickPointerEntered.revoke();
+            _tabItemMiddleClickPointerExited.revoke();
+            _tabItemMiddleClickPointerCaptureLost.revoke();
+
+            if (!_tabItemMiddleClickExited && !e.GetCurrentPoint(nullptr).Properties().IsMiddleButtonPressed())
+            {
+                _OnTabPointerReleasedCloseTab(std::move(sender), _tabLayoutGeneration);
+            }
+
+            e.Handled(true);
+        });
+        e.Handled(true);
+    }
+
+    safe_void_coroutine TerminalPage::_OnTabPointerReleasedCloseTab(IInspectable sender, const uint64_t layoutGeneration)
+    {
+        // WinUI asynchronously updates its tab view items, so it may happen that we're given a
+        // `TabViewItem` that still contains a `Tab` which has actually already been removed.
+        // First we must yield once, to flush out whatever TabView is currently doing.
+        const auto weak = get_weak();
+        co_await wil::resume_foreground(Dispatcher());
+        const auto strong = weak.get();
+        if (!strong)
+        {
+            co_return;
+        }
+        if (strong->_changingTabLayout ||
+            strong->_tabLayoutGeneration != layoutGeneration ||
+            strong->_IsCollapsedVerticalRail())
+        {
+            co_return;
+        }
+
+        const auto tab = _GetTabByTabViewItem(sender);
+        if (!tab)
+        {
+            co_return;
+        }
+
+        // `tab.Shutdown()` in `_RemoveTab()` sets the content to null = This checks if the tab is closed.
+        if (tab.Content())
+        {
+            _HandleCloseTabRequested(tab);
+        }
+    }
+
+    void TerminalPage::_UpdatedSelectedTab(const winrt::TerminalApp::Tab& tab)
+    {
+        // Unfocus all the tabs.
+        for (const auto& tab : _tabs)
+        {
+            tab.Focus(FocusState::Unfocused);
+        }
+
+        try
+        {
+            _tabContent.Children().Clear();
+            auto content = tab.Content();
+            content.Opacity(1.0);
+            content.IsHitTestVisible(true);
+            _tabContent.Children().Append(content);
+
+            // GH#7409: If the tab switcher is open, then we _don't_ want to
+            // automatically focus the new tab here. The tab switcher wants
+            // to be able to "preview" the selected tab as the user tabs
+            // through the menu, but if we toss the focus to the control
+            // here, then the user won't be able to navigate the ATS any
+            // longer.
+            //
+            // When the tab switcher is eventually dismissed, the focus will
+            // get tossed back to the focused terminal control, so we don't
+            // need to worry about focus getting lost.
+            const auto p = CommandPaletteElement();
+            if (!p || p.Visibility() != Visibility::Visible)
+            {
+                tab.Focus(FocusState::Programmatic);
+                _UpdateMRUTab(tab);
+                _updateAllTabCloseButtons();
+            }
+
+            tab.TabViewItem().StartBringIntoView();
+
+            // Raise an event that our title changed
+            TitleChanged.raise(*this, nullptr);
+
+            _updateThemeColors();
+
+            auto tabImpl = _GetTabImpl(tab);
+            if (tabImpl)
+            {
+                auto profile = tabImpl->GetFocusedProfile();
+                _UpdateBackground(profile);
+            }
+
+            // Refresh the bottom bar's *visibility* synchronously here
+            // so it tracks the tab type immediately. Tab kind alone
+            // (terminal/agent vs Settings/etc.) determines whether the
+            // bar is shown at all. Without this call, switching from a
+            // terminal tab to the Settings tab leaves the bar visible
+            // forever: PR #54 moved bottom-bar refresh entirely onto
+            // the wta `agent_state_changed` callback path, but Settings
+            // tabs have no helper and never fire that callback.
+            //
+            // Crucially we use the visibility-only helper rather than
+            // the full `_UpdateBottomBarState` — the latter would also
+            // recompute the agent-state-dependent UI (toggle lit-state,
+            // diagnostics) from the local AgentPaneContent mirror,
+            // which can lag wta after a cross-window drag or other
+            // helper-state mutations. Letting the subsequent
+            // `OnAgentStateChanged` callback own that refresh keeps
+            // the bar's agent UI authoritative.
+            _UpdateBottomBarVisibility();
+            _UpdateSidebarHistoryCurrentSession();
+
+            // Bottom-bar refresh is now driven by wta — fire `tab_changed`
+            // so wta re-projects this tab's authoritative agent-pane state
+            // (`project_active_tab_state` → `agent_state_changed`).
+            // `OnAgentStateChanged` applies the snapshot to the local
+            // AgentPaneContent mirror and refreshes the bottom bar. Avoids
+            // the stale-mirror race that bit after cross-window drag
+            // (helper state diverged from local cache).
+            if (auto tabImplForNotify = _GetTabImpl(tab))
+            {
+                _NotifyAgentTabChanged(tabImplForNotify->StableId());
+            }
+
+            _adjustProcessPriorityThrottled->Run();
+        }
+        CATCH_LOG();
+    }
+
+    void TerminalPage::_UpdateBackground(const winrt::Microsoft::Terminal::Settings::Model::Profile& profile)
+    {
+        if (profile && _settings.GlobalSettings().UseBackgroundImageForWindow())
+        {
+            _SetBackgroundImage(profile.DefaultAppearance());
+        }
+    }
+
+    // Method Description:
+    // - Responds to the TabView control's Selection Changed event (to move a
+    //      new terminal control into focus) when not in in the middle of a tab rearrangement.
+    // Arguments:
+    // - sender: the control that originated this event
+    // - eventArgs: the event's constituent arguments
+    void TerminalPage::_OnTabSelectionChanged(const IInspectable& sender, const WUX::Controls::SelectionChangedEventArgs& /*eventArgs*/)
+    {
+        if (_changingTabLayout || !_IsActiveTabControl(sender))
+        {
+            return;
+        }
+        _OnSelectionChangedCore();
+        _UpdateTabFilterStatus();
+    }
+
+    void TerminalPage::_ApplyTabListProjection(
+        const TerminalApp::Tab& changedTab,
+        const bool refreshPaneItems,
+        const bool updateBookkeeping)
+    {
+        if (!_tabStrip)
+        {
+            return;
+        }
+
+        if (_rearranging || _mutatingTabCollections)
+        {
+            _pendingTabProjectionRefresh = true;
+            return;
+        }
+
+        const auto refreshAll = _pendingTabProjectionRefresh || !changedTab;
+        _pendingTabProjectionRefresh = false;
+        const bool positionOperationsBlocked = _IsTabListPositionOperationBlocked();
+        const auto highlightQuery = _IsTabSearchEffective() ? _tabSearchQuery : winrt::hstring{};
+        const auto tabStrip = _isVerticalLayout ?
+                                  winrt::get_self<implementation::TabStrip>(_tabStrip) :
+                                  nullptr;
+
+        const auto apply = [&](const TerminalApp::Tab& tab, const TerminalApp::TabStripDisplayItem& projectedDisplay) {
+            const auto item = tab.TabViewItem();
+            const auto display = projectedDisplay ? projectedDisplay :
+                                                    (tabStrip ? tabStrip->DisplayItemForTab(item) : nullptr);
+            const auto header = item.Header().try_as<TerminalApp::TabHeaderControl>();
+            if (display)
+            {
+                display.SearchText(highlightQuery);
+                display.Presentation().SearchText(highlightQuery);
+                for (const auto& pane : display.PaneItems())
+                {
+                    pane.HighlightQuery(highlightQuery);
+                }
+            }
+            if (header)
+            {
+                header.SearchText(highlightQuery);
+            }
+            const auto tabImpl = _GetTabImpl(tab);
+            if (tabImpl && _isVerticalLayout && refreshPaneItems)
+            {
+                _RefreshTabStripPaneItems(tabImpl, display);
+            }
+            const auto visible = _IsTabVisibleInProjection(tabImpl, display);
+            if (tabImpl)
+            {
+                tabImpl->SetTabListPositionOperationsRestricted(positionOperationsBlocked);
+                tabImpl->SetTabPointerInteractionRestricted(_IsCollapsedVerticalRail());
+            }
+            if (display)
+            {
+                tabStrip->SetTabItemVisibility(display, visible);
+            }
+            else
+            {
+                _tabStrip.SetTabItemVisibility(item, visible);
+            }
+        };
+        if (!refreshAll)
+        {
+            apply(changedTab, nullptr);
+        }
+        else
+        {
+            for (uint32_t index = 0; index < _tabs.Size(); ++index)
+            {
+                apply(_tabs.GetAt(index), tabStrip ? tabStrip->DisplayItemAt(index) : nullptr);
+            }
+        }
+
+        if (updateBookkeeping)
+        {
+            _UpdateTabFilterStatus();
+        }
+        const auto canDragDrop = CanDragDrop() &&
+                                 !positionOperationsBlocked &&
+                                 !_IsCollapsedVerticalRail();
+        _tabStrip.CanReorderTabs(canDragDrop);
+        _tabStrip.CanDragTabs(canDragDrop);
+        if (updateBookkeeping)
+        {
+            _UpdateSidebarHistoryCurrentSession();
+        }
+    }
+
+    void TerminalPage::_UpdateTabFilterStatus()
+    {
+        if (!_tabStrip || !_isVerticalLayout)
+        {
+            return;
+        }
+
+        uint32_t visibleCount = _tabs.Size();
+        bool selectedMatches = true;
+        if (_IsAgentScopeEffective())
+        {
+            visibleCount = 0;
+            const auto selected = _selectedTabItem();
+            for (const auto& tab : _tabs)
+            {
+                const auto matches = _MatchesTabScope(_GetTabImpl(tab));
+                visibleCount += matches ? 1u : 0u;
+                if (tab.TabViewItem() == selected)
+                {
+                    selectedMatches = matches;
+                }
+            }
+        }
+        _tabStrip.SetFilterStatus(visibleCount, selectedMatches);
+    }
+
+    bool TerminalPage::_MatchesTabScope(const winrt::com_ptr<Tab>& tab) const
+    {
+        return tab && (tab->IsAgentTab() || _TabHasCliAgent(tab));
+    }
+
+    bool TerminalPage::_MatchesTabSearch(const Tab& tab, const TerminalApp::TabStripDisplayItem& projectedDisplay) const
+    {
+        if (!_IsTabSearchEffective())
+        {
+            return true;
+        }
+
+        const std::wstring_view query{ _tabSearchQuery.c_str(), _tabSearchQuery.size() };
+        if (query.empty())
+        {
+            return true;
+        }
+
+        const auto matches = [&](const std::wstring_view value) {
+            if (query.size() > value.size())
+            {
+                return false;
+            }
+
+            for (size_t offset = 0; offset + query.size() <= value.size(); ++offset)
+            {
+                if (til::compare_ordinal_insensitive(value.substr(offset, query.size()), query) == 0)
+                {
+                    return true;
+                }
+            }
+            return false;
+        };
+
+        const auto title = tab.Title();
+        if (matches(std::wstring_view{ title.c_str(), title.size() }))
+        {
+            return true;
+        }
+
+        const auto tabStrip = _isVerticalLayout && _tabStrip ?
+                                  winrt::get_self<implementation::TabStrip>(_tabStrip) :
+                                  nullptr;
+        const auto display = projectedDisplay ? projectedDisplay :
+                                                (tabStrip ? tabStrip->DisplayItemForTab(tab.TabViewItem()) : nullptr);
+        const auto header = tab.TabViewItem().Header().try_as<TerminalApp::TabHeaderControl>();
+        const auto metadataVisible = display ? display.IsMetadataVisible() : header && header.IsMetadataVisible();
+        if (metadataVisible)
+        {
+            const auto metadata = display ? display.Presentation().MetadataText() : header.MetadataText();
+            if (matches(std::wstring_view{ metadata.c_str(), metadata.size() }))
+            {
+                return true;
+            }
+        }
+
+        if (!display || display.ChildrenVisibility() != Visibility::Visible)
+        {
+            return false;
+        }
+
+        for (const auto& pane : display.PaneItems())
+        {
+            const auto title = pane.Title();
+            if (matches(std::wstring_view{ title.c_str(), title.size() }))
+            {
+                return true;
+            }
+
+            if (pane.MetadataVisibility() == Visibility::Visible)
+            {
+                const auto metadata = pane.MetadataText();
+                if (matches(std::wstring_view{ metadata.c_str(), metadata.size() }))
+                {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    bool TerminalPage::_IsTabVisibleInProjection(const winrt::com_ptr<Tab>& tab, const TerminalApp::TabStripDisplayItem& display) const
+    {
+        if (!tab)
+        {
+            return !_IsTabSearchEffective() && !_IsAgentScopeEffective();
+        }
+        return (!_IsAgentScopeEffective() || _MatchesTabScope(tab)) &&
+               _MatchesTabSearch(*tab, display);
+    }
+
+    bool TerminalPage::_IsKnownAgentCliTitle(const std::wstring_view title) noexcept
+    {
+        for (const auto& agent : ::Microsoft::Terminal::Settings::Model::AgentRegistry::BuiltinDelegateAgents)
+        {
+            if (::Microsoft::Terminal::Settings::Model::AgentRegistry::AgentIdEquals(title, agent.displayName))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    bool TerminalPage::_TabHasCliAgent(const winrt::com_ptr<Tab>& tab) const
+    {
+        if (!tab)
+        {
+            return false;
+        }
+
+        // Agent CLIs set a stable, known terminal title before their first
+        // session event. Ignore user-renamed tabs so an arbitrary custom title
+        // cannot opt a normal shell into the Agent filter.
+        if (tab->GetTabText().empty() && _IsKnownAgentCliTitle(tab->Title()))
+        {
+            return true;
+        }
+
+        const auto rootPane = tab->GetRootPane();
+        return rootPane && rootPane->WalkTree([&](const auto& pane) {
+            const auto sessionId = pane->GetSessionId();
+            return sessionId != winrt::guid{} &&
+                   (_activeCliAgentPanes.contains(sessionId) ||
+                    _paneAgentSessions.contains(sessionId));
+        });
+    }
+
+    bool TerminalPage::_MatchesPaneAgentScope(const Tab::VisiblePaneSnapshot& pane) const
+    {
+        return pane.IsAgentPane ||
+               _IsKnownAgentCliTitle(std::wstring_view{ pane.Title }) ||
+               (pane.SessionId != winrt::guid{} &&
+                (_activeCliAgentPanes.contains(pane.SessionId) ||
+                 _paneAgentSessions.contains(pane.SessionId)));
+    }
+
+    bool TerminalPage::_IsPaneRowProjectionEligible(const Tab::VisiblePaneSnapshot& pane) const
+    {
+        return !pane.IsAgentPane &&
+               (!_IsAgentScopeEffective() || _MatchesPaneAgentScope(pane));
+    }
+
+    // Spec A §4.2: TabStrip's SelectionChanged uses custom args (TabStripSelectionChangedEventArgs),
+    // so it needs its own wrapper. Both wrappers dispatch to the same core method,
+    // which uses the routing helpers instead of asking sender for its selection.
+    void TerminalPage::_OnTabStripSelectionChanged(const IInspectable& sender, const TerminalApp::TabStripSelectionChangedEventArgs& /*eventArgs*/)
+    {
+        if (_changingTabLayout || !_IsActiveTabControl(sender))
+        {
+            return;
+        }
+        _OnSelectionChangedCore();
+        _UpdateTabFilterStatus();
+    }
+
+    void TerminalPage::_OnSelectionChangedCore()
+    {
+        if (!_changingTabLayout && !_rearranging && !_removing && !_mutatingTabCollections)
+        {
+            // Look up selection via the router — works for both TabView and
+            // TabStrip because _selectedTabItem and _tabItems both branch on
+            // _isVerticalLayout.
+            if (const auto selectedItem = _selectedTabItem())
+            {
+                uint32_t selectedIndex{};
+                if (_tabItems().IndexOf(selectedItem, selectedIndex) && selectedIndex < _tabs.Size())
+                {
+                    const auto selectedTab = _tabs.GetAt(selectedIndex);
+                    _UpdatedSelectedTab(selectedTab);
+                    if (const auto tab = _GetTabImpl(selectedTab))
+                    {
+                        _RefreshRichTabForTab(*tab, true);
+                    }
+                }
+            }
+            // Flush any deferred agent-stack rebuild now that a real
+            // terminal tab is active. Per-tab model — no shared pane
+            // reconciliation needed.
+            _FlushPendingAgentSettingsReconciliation();
+        }
+    }
+
+    // Method Description:
+    // - Updates all tabs with their current index in _tabs.
+    // Arguments:
+    // - <none>
+    // Return Value:
+    // - <none>
+    void TerminalPage::_UpdateTabIndices()
+    {
+        const auto size = _tabs.Size();
+        const auto pinnedCount = _PinnedTabCount();
+        for (uint32_t i = 0; i < size; ++i)
+        {
+            auto tab{ _tabs.GetAt(i) };
+            auto tabImpl{ winrt::get_self<Tab>(tab) };
+            tabImpl->UpdateTabViewIndex(i, size, pinnedCount);
+        }
+    }
+
+    uint32_t TerminalPage::_PinnedTabCount() const
+    {
+        uint32_t count = 0;
+        for (const auto& tab : _tabs)
+        {
+            if (!_GetTabImpl(tab)->IsPinned())
+            {
+                break;
+            }
+            ++count;
+        }
+        return count;
+    }
+
+    void TerminalPage::_RequestPinTab(const winrt::com_ptr<Tab>& tab, bool pinned)
+    {
+        if (!tab || !_GetTabIndex(*tab) || !tab->CanKeepRunning() || _IsTabListPositionOperationBlocked())
+        {
+            return;
+        }
+        if (_rearranging || _changingTabLayout)
+        {
+            _pendingPinTab = tab->get_weak();
+            _pendingPinValue = pinned;
+            return;
+        }
+        _SetTabPinned(tab, pinned);
+    }
+
+    void TerminalPage::_ApplyPendingPinRequest()
+    {
+        if (!_rearranging && !_changingTabLayout)
+        {
+            const auto tab = _pendingPinTab.get();
+            _pendingPinTab = {};
+            if (tab)
+            {
+                _RequestPinTab(tab, _pendingPinValue);
+            }
+        }
+    }
+
+    void TerminalPage::_SetTabPinned(const winrt::com_ptr<Tab>& tab, bool pinned)
+    {
+        if (!tab || tab->IsPinned() == pinned || !tab->CanKeepRunning())
+        {
+            return;
+        }
+        const auto index = _GetTabIndex(*tab);
+        if (!index)
+        {
+            return;
+        }
+        const auto boundary = _PinnedTabCount();
+        const auto destination = pinned ? boundary : boundary - 1;
+        tab->IsPinned(pinned);
+        _MoveTabToIndex(*index, destination, false);
+        if (*index == destination)
+        {
+            _UpdateTabIndices();
+        }
+        if (_isVerticalLayout)
+        {
+            winrt::get_self<implementation::TabStrip>(_tabStrip)->SetTabPinned(tab->TabViewItem(), pinned);
+        }
+    }
+
+    // Method Description:
+    // - Bumps the tab in its in-order index up to the top of the mru list.
+    // Arguments:
+    // - tab: tab to bump.
+    // Return Value:
+    // - <none>
+    void TerminalPage::_UpdateMRUTab(const winrt::TerminalApp::Tab& tab)
+    {
+        uint32_t mruIndex;
+        if (_mruTabs.IndexOf(tab, mruIndex))
+        {
+            if (mruIndex > 0)
+            {
+                _mruTabs.RemoveAt(mruIndex);
+                _mruTabs.InsertAt(0, tab);
+            }
+        }
+    }
+
+    // Method Description:
+    // - Moves the tab to another index in the tabs row (if required).
+    // Arguments:
+    // - currentTabIndex: the current index of the tab to move
+    // - suggestedNewTabIndex: the new index of the tab, might get clamped to fit int the tabs row boundaries
+    // Return Value:
+    // - <none>
+    void TerminalPage::_TryMoveTab(const uint32_t currentTabIndex,
+                                   const int32_t suggestedNewTabIndex)
+    {
+        if (_tabs.Size() == 0 || currentTabIndex >= _tabs.Size())
+        {
+            return;
+        }
+        const auto boundary = _PinnedTabCount();
+        const auto pinned = _GetTabImpl(_tabs.GetAt(currentTabIndex))->IsPinned();
+        const auto first = pinned ? 0 : boundary;
+        const auto last = pinned ? boundary - 1 : _tabs.Size() - 1;
+        const auto newTabIndex = gsl::narrow_cast<uint32_t>(std::clamp<int32_t>(suggestedNewTabIndex,
+                                                                              gsl::narrow_cast<int32_t>(first),
+                                                                              gsl::narrow_cast<int32_t>(last)));
+        _MoveTabToIndex(currentTabIndex, newTabIndex, true);
+    }
+
+    void TerminalPage::_MoveTabToIndex(uint32_t currentTabIndex, uint32_t newTabIndex, bool selectMoved)
+    {
+        if (currentTabIndex != newTabIndex)
+        {
+            const auto previouslySelected = _selectedTabItem();
+            _mutatingTabCollections = true;
+            auto endMutation = wil::scope_exit([&]() noexcept {
+                _mutatingTabCollections = false;
+            });
+
+            auto tab = _tabs.GetAt(currentTabIndex);
+            auto tabViewItem = tab.TabViewItem();
+            _tabs.RemoveAt(currentTabIndex);
+            _tabs.InsertAt(newTabIndex, tab);
+            _UpdateTabIndices();
+
+            if (_isVerticalLayout)
+            {
+                winrt::get_self<implementation::TabStrip>(_tabStrip)->MoveTabItem(currentTabIndex, newTabIndex);
+            }
+            else
+            {
+                _tabItems().RemoveAt(currentTabIndex);
+                _tabItems().InsertAt(newTabIndex, tabViewItem);
+            }
+            _selectedTabItem(selectMoved ? tabViewItem : previouslySelected);
+
+            _mutatingTabCollections = false;
+            endMutation.release();
+            _UpdateTabView();
+            _ApplyTabListProjection(tab);
+
+            if (selectMoved)
+            {
+                if (auto autoPeer = Automation::Peers::FrameworkElementAutomationPeer::FromElement(*this))
+                {
+                    const auto tabTitle = tab.Title();
+                    autoPeer.RaiseNotificationEvent(Automation::Peers::AutomationNotificationKind::ActionCompleted,
+                                                    Automation::Peers::AutomationNotificationProcessing::ImportantMostRecent,
+                                                    RS_fmt(L"TerminalPage_TabMovedAnnouncement_Direction", tabTitle, newTabIndex + 1),
+                                                    L"TerminalPageMoveTabWithDirection" /* unique name for this notification category */);
+                }
+            }
+        }
+    }
+
+    void TerminalPage::_TabDragStarted(const IInspectable& sender,
+                                       const IInspectable& /*eventArgs*/)
+    {
+        if (_changingTabLayout ||
+            !_IsActiveTabControl(sender) ||
+            _IsCollapsedVerticalRail() ||
+            _IsTabListPositionOperationBlocked())
+        {
+            return;
+        }
+        _rearranging = true;
+        _tabDragReorderAuthorized = true;
+        _tabDragSelectedItem = _selectedTabItem();
+        _rearrangeFrom = std::nullopt;
+        _rearrangeTo = std::nullopt;
+        winrt::get_self<implementation::TabStrip>(_tabStrip)->ProjectionControlsEnabled(false);
+    }
+
+    void TerminalPage::_TabDragCompleted(const IInspectable& sender,
+                                         const IInspectable& /*eventArgs*/)
+    {
+        if (_changingTabLayout || !_IsActiveTabControl(sender))
+        {
+            return;
+        }
+
+        if (!_rearranging)
+        {
+            winrt::get_self<implementation::TabStrip>(_tabStrip)->ProjectionControlsEnabled(true);
+            if (_pendingTabProjectionRefresh)
+            {
+                _ApplyTabListProjection();
+            }
+            return;
+        }
+
+        auto& from{ _rearrangeFrom };
+        auto& to{ _rearrangeTo };
+
+        const auto validIndices = from.has_value() && to.has_value() &&
+                                  *from >= 0 && *to >= 0 &&
+                                  *from < gsl::narrow_cast<int32_t>(_tabs.Size()) &&
+                                  *to < gsl::narrow_cast<int32_t>(_tabs.Size());
+        const auto canCommitReorder = _tabDragReorderAuthorized && validIndices &&
+                                      _GetTabImpl(_tabs.GetAt(*from))->IsPinned() ==
+                                          _GetTabImpl(_tabs.GetAt(*to))->IsPinned();
+
+        if (canCommitReorder && from.has_value() && to.has_value() && to != from)
+        {
+            try
+            {
+                auto& tabs{ _tabs };
+                auto tab = tabs.GetAt(from.value());
+                tabs.RemoveAt(from.value());
+                tabs.InsertAt(to.value(), tab);
+                _UpdateTabIndices();
+            }
+            CATCH_LOG();
+        }
+        else if (from.has_value() && to.has_value() && to != from)
+        {
+            _mutatingTabCollections = true;
+            auto endMutation = wil::scope_exit([&]() noexcept {
+                _mutatingTabCollections = false;
+            });
+            std::vector<IInspectable> canonicalItems;
+            canonicalItems.reserve(_tabs.Size());
+            for (const auto& tab : _tabs)
+            {
+                canonicalItems.emplace_back(tab.TabViewItem());
+            }
+            if (_isVerticalLayout)
+            {
+                winrt::get_self<implementation::TabStrip>(_tabStrip)->RestoreTabOrder(canonicalItems);
+            }
+            else
+            {
+                _tabItems().ReplaceAll(canonicalItems);
+            }
+            if (_tabDragSelectedItem)
+            {
+                _selectedTabItem(_tabDragSelectedItem);
+            }
+            _mutatingTabCollections = false;
+            endMutation.release();
+        }
+
+        _rearranging = false;
+
+        if (canCommitReorder &&
+            to.has_value() &&
+            *to >= 0 &&
+            *to < gsl::narrow_cast<int32_t>(_tabs.Size()))
+        {
+            _selectedTabItem(_tabs.GetAt(gsl::narrow_cast<uint32_t>(*to)).TabViewItem());
+        }
+
+        from = std::nullopt;
+        to = std::nullopt;
+        _tabDragReorderAuthorized = false;
+        _tabDragSelectedItem = nullptr;
+        winrt::get_self<implementation::TabStrip>(_tabStrip)->ProjectionControlsEnabled(true);
+        _ApplyTabListProjection();
+        _ApplyPendingPinRequest();
+
+        if (_pendingTabLayout)
+        {
+            Dispatcher().RunAsync(CoreDispatcherPriority::Low, [weakThis{ get_weak() }]() {
+                if (const auto page = weakThis.get())
+                {
+                    page->_ApplyPendingTabLayout();
+                }
+            });
+        }
+    }
+
+    void TerminalPage::_DismissTabContextMenus()
+    {
+        for (const auto& tab : _tabs)
+        {
+            if (tab.TabViewItem().ContextFlyout())
+            {
+                tab.TabViewItem().ContextFlyout().Hide();
+            }
+        }
+    }
+
+    void TerminalPage::_FocusCurrentTab(const bool focusAlways)
+    {
+        // We don't want to set focus on the tab if fly-out is open as it will
+        // be closed TODO GH#5400: consider checking we are not in the opening
+        // state, by hooking both Opening and Open events
+        if (focusAlways || !_newTabButton.Flyout().IsOpen())
+        {
+            // Return focus to the active control
+            if (auto tab{ _GetFocusedTab() })
+            {
+                tab.Focus(FocusState::Programmatic);
+                _UpdateMRUTab(tab);
+                _updateAllTabCloseButtons();
+            }
+        }
+    }
+
+    bool TerminalPage::_HasMultipleTabs() const
+    {
+        return _tabs.Size() > 1;
+    }
+
+    // Method Description:
+    // - Attempts to find and focus the given tab in this window.
+    // Arguments:
+    // - tab: The tab to focus.
+    // Return Value:
+    // - true if the tab was found and focused, false otherwise.
+    bool TerminalPage::FocusTab(const winrt::TerminalApp::Tab& tab)
+    {
+        if (const auto tabIndex{ _GetTabIndex(tab) })
+        {
+            _SelectTab(tabIndex.value());
+            return true;
+        }
+        return false;
+    }
+
+    // Method Description:
+    // - Sends a desktop toast notification with the given title and body.
+    //   When the toast is activated (clicked), the window is summoned and
+    //   the originating tab is focused.
+    // Arguments:
+    // - tabTitle: The title to display in the notification.
+    // - body: The body text. If empty, a standard tab-activity message is built.
+    // - tab: The tab to switch to when the toast is activated.
+    void TerminalPage::_SendDesktopNotification(const winrt::hstring& tabTitle, const winrt::hstring& body, const winrt::com_ptr<Tab>& tab, const winrt::TerminalApp::IPaneContent& content)
+    {
+        // Don't send a notification if the window is focused and the requesting
+        // pane is the active pane. The user is already looking at it.
+        if (_activated && tab == _GetFocusedTabImpl())
+        {
+            if (const auto activePane{ tab->GetActivePane() })
+            {
+                if (activePane->GetContent() == content)
+                {
+                    return;
+                }
+            }
+        }
+
+        // Build the notification message.
+        // If a custom body is provided (e.g. from OSC 777), use the title/body directly.
+        // Otherwise, build the standard tab-activity notification message.
+        winrt::hstring notificationTitle;
+        winrt::hstring message;
+        if (!body.empty())
+        {
+            notificationTitle = tabTitle;
+            message = body;
+        }
+        else
+        {
+            // Use the window name if available for context; otherwise just use the tab title.
+            // Use the raw WindowName (not WindowNameForDisplay) so we don't include
+            // the "<unnamed window>" placeholder in the notification body.
+            const auto windowName = _WindowProperties ? _WindowProperties.WindowName() : winrt::hstring{};
+            if (!windowName.empty())
+            {
+                message = RS_fmt(L"NotificationMessage_TabActivityInWindow", std::wstring_view{ tabTitle }, std::wstring_view{ windowName });
+            }
+            else
+            {
+                message = RS_fmt(L"NotificationMessage_TabActivity", std::wstring_view{ tabTitle });
+            }
+            notificationTitle = CascadiaSettings::ApplicationDisplayName();
+        }
+
+        // Use the Tab object's identity hash as a stable toast tag.
+        // This survives tab reordering and cross-window moves.
+        const auto tabHash = std::hash<winrt::Windows::Foundation::IUnknown>{}(*tab);
+#ifdef _WIN64
+        const hstring tabTag{ fmt::format(FMT_COMPILE(L"wt-tab-{:016x}"), tabHash) };
+#else
+        const hstring tabTag{ fmt::format(FMT_COMPILE(L"wt-tab-{:08x}"), tabHash) };
+#endif
+
+        const implementation::DesktopNotificationArgs args{
+            .Title = notificationTitle,
+            .Message = message,
+            .Tag = tabTag
+        };
+
+        implementation::DesktopNotification::SendNotification(args, [weakThis{ get_weak() }, weakTab{ tab->get_weak() }, weakContent{ winrt::make_weak(content) }]() {
+            if (const auto page{ weakThis.get() })
+            {
+                // The toast Activated callback runs on a background thread.
+                // Marshal to the UI thread for tab focus and window summon.
+                page->Dispatcher().RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Normal, [weakPage{ page->get_weak() }, weakTab, weakContent]() {
+                    if (const auto p{ weakPage.get() })
+                    {
+                        if (const auto t{ weakTab.get() })
+                        {
+                            // Try to find and focus the tab in this window first.
+                            if (const auto tabIndex{ p->_GetTabIndex(*t) })
+                            {
+                                p->SummonWindowRequested.raise(nullptr, nullptr);
+                                p->_SelectTab(tabIndex.value());
+
+                                // Focus the specific pane that raised the notification.
+                                if (const auto paneContent{ weakContent.get() })
+                                {
+                                    const auto rootPane = t->GetRootPane();
+                                    rootPane->WalkTree([&](const auto& pane) {
+                                        if (pane->GetContent() == paneContent)
+                                        {
+                                            rootPane->FocusPane(pane);
+                                        }
+                                    });
+                                }
+                            }
+                            else
+                            {
+                                // The tab may have moved to another window.
+                                // Raise FocusTabRequested so the emperor can
+                                // search all windows for it.
+                                p->FocusTabRequested.raise(nullptr, *t);
+                            }
+                        }
+                        else
+                        {
+                            // Tab was closed. Just summon this window.
+                            p->SummonWindowRequested.raise(nullptr, nullptr);
+                        }
+                    }
+                });
+            }
+        });
+    }
+}

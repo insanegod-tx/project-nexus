@@ -1,0 +1,271 @@
+# عناوين شاشة الإعداد
+# {Locked=qps-ploc,qps-ploca,qps-plocm}
+setup.title.agent_missing: "لم يتم العثور على عامل الذكاء الاصطناعي"
+setup.title.agent_error: "فشل الاتصال بعامل الذكاء الاصطناعي"
+setup.title.not_available: "عامل الذكاء الاصطناعي غير متوفر"
+setup.title.sign_in: "تسجيل الدخول مطلوب"
+
+# يتم استبدال %{agent} باسم عرض عامل الذكاء الاصطناعي في وقت التشغيل.
+setup.subtitle.copilot_missing: "عامل الذكاء الاصطناعي \"%{agent}\" غير مثبّت. اتبع الخطوات أدناه لتثبيته. لتبديل عوامل الذكاء الاصطناعي، انتقل إلى الوحدة الطرفية الذكية Settings > Agent."
+setup.subtitle.agent_missing: "عامل الذكاء الاصطناعي \"%{agent}\" غير مثبّت. يُرجى إعادة تثبيته يدويًا، ثم أعد المحاولة. لتبديل عوامل الذكاء الاصطناعي، انتقل إلى الوحدة الطرفية الذكية Settings > Agent."
+setup.subtitle.copilot_auth: "يتطلب عامل الذكاء الاصطناعي \"%{agent}\" المصادقة. اتبع الخطوات أدناه لتسجيل الدخول. لتبديل عوامل الذكاء الاصطناعي، انتقل إلى الوحدة الطرفية الذكية Settings > Agent."
+setup.subtitle.agent_auth: "يتطلب عامل الذكاء الاصطناعي \"%{agent}\" المصادقة. يُرجى تسجيل الدخول عبر عامل الذكاء الاصطناعي، ثم حدد \"لقد سجّلت الدخول\" أدناه. لتبديل عوامل الذكاء الاصطناعي، انتقل إلى الوحدة الطرفية الذكية Settings > Agent."
+setup.subtitle.connection_failed: "تعذر بدء تشغيل %{agent}."
+
+# {Locked=qps-ploc,qps-ploca,qps-plocm}
+
+setup.option.install: "تثبيت %{agent}"
+setup.option.install_hint: "(سيتم التثبيت تلقائيًا)"
+setup.option.signin: "تسجيل الدخول إلى %{agent}"
+setup.option.retry_detection: "حاول مرة أخرى"
+setup.option.retry_auth: "لقد سجّلت الدخول — حاول الاتصال مرة أخرى"
+setup.option.retry_connection: "حاول الاتصال مرة أخرى"
+setup.status.installing: "جارٍ التثبيت..."
+setup.status.installing_copilot_cli: "جارٍ تثبيت GitHub Copilot CLI"
+setup.status.connecting_agent: "جارٍ الاتصال بـ %{agent}"
+setup.status.install_failed: "فشل التثبيت: "
+setup.status.installing_winget: " جارٍ التثبيت عبر winget..."
+setup.error.install_start_failed: "تعذر بدء تشغيل برنامج التثبيت. حدد \"حاول مرة أخرى\" لإعادة المحاولة."
+setup.error.install_timed_out: "انتهت مهلة التثبيت. حدد \"حاول مرة أخرى\" قبل بدء عملية تثبيت أخرى."
+setup.error.install_detection_timed_out: "اكتمل التثبيت، ولكن Copilot غير ظاهر بعد. حدد \"حاول مرة أخرى\" للتحقق مرة أخرى."
+
+# ── تدفق المصادقة (src/ui/auth.rs) ──────────────────────────────────────────────
+# {Locked="CLI"} - اختصار، استخدام شائع في عمليات الترجمة من Microsoft
+auth.agent_selected: "تم تحديد CLI عامل الذكاء الاصطناعي %{name}"
+auth.agent_selected_with_status: "CLI عامل الذكاء الاصطناعي %{name} — "
+auth.checking_authentication: "  %{spinner} جارٍ التحقق من المصادقة..."
+auth.waiting_for_authorization: "  %{spinner} في انتظار التفويض..."
+auth.code_copied_hint: "  تم نسخ الرمز إلى الحافظة — الصقه في المتصفح."
+auth.device_code_prompt: "تفضّل بزيارة %{url} وأدخل الرمز: %{code}"  # Copilot device-flow sign-in progress; %{url} is the verification URL, %{code} is the device code
+auth.card_connect: "  قم بتوصيل %{name} لتمكين ميزات عامل الذكاء الاصطناعي"
+auth.enterprise_prompt: "  Enter لتسجيل الدخول · E لاستخدام GitHub Enterprise · Esc للعودة"  # {Locked="Enter","E","Esc"}
+auth.enterprise_domain_label: "  مجال المؤسسة: "
+auth.enterprise_hint_footer: "  Enter لتسجيل الدخول · Esc لاستخدام github.com"  # {Locked="Enter","Esc","github.com"}
+auth.login_failed_help_enterprise: "  اضغط على Enter لإعادة المحاولة، أو Esc لاستخدام github.com. الأسباب الشائعة: مجال مكتوب بشكل خاطئ أو لا يمكن الوصول إليه، أو رمز منتهي الصلاحية، أو عدم وجود وصول إلى Copilot على ذلك المضيف."  # {Locked="Enter","Esc","github.com","Copilot"}
+auth.login_failed_help_default: "  اضغط على Enter لإعادة المحاولة، أو Esc للعودة."  # {Locked="Enter","Esc"}
+
+# ── عرض الدردشة (src/ui/chat.rs) ──────────────────────────────────────────────
+chat.activity_thinking: "جارٍ التفكير…"
+# {Locked=qps-ploc,qps-ploca,qps-plocm}
+chat.welcome_title: "مرحبًا بك في الوحدة الطرفية الذكية!"
+chat.welcome_disclaimer: "يستخدم الوحدة الطرفية الذكية الذكاء الاصطناعي."
+chat.plan_header: "الخطة:"
+chat.plan_marker_completed: "[x]"  # {Locked}
+chat.plan_marker_in_progress: "[>]"  # {Locked}
+chat.plan_marker_pending: "[ ]"  # {Locked}
+chat.autofix_prompt_label: "تم التشخيص التلقائي لفشل أمر حديث"
+chat.turn_canceled: "(تم الإلغاء)"
+chat.turn_executed: "→ تم التنفيذ: %{title}"
+# Persistent tool-category labels shown after a status marker and before a subject.
+chat.tool_kind.run: "تشغيل"
+chat.tool_kind.insert: "إدراج"
+chat.tool_kind.read: "قراءة"
+chat.tool_kind.search: "بحث"
+chat.tool_kind.edit: "تحرير"
+chat.tool_kind.delete: "حذف"
+chat.tool_kind.move: "نقل"
+chat.tool_kind.fetch: "جلب"
+chat.tool_kind.think: "تفكير"
+chat.tool_kind.mode: "وضع"
+chat.tool_kind.other: "أداة"
+
+# ── عناصر نائبة للإدخال (src/ui/input.rs) ────────────────────────────────────
+input.placeholder.connected: "اسأل أي شيء، / للأوامر.."  # {Locked="/"}
+input.placeholder.connecting: "جارٍ الاتصال..."
+input.placeholder.disconnected: "غير متصل"
+# Summary of attached images; keep 📎 and %{items} verbatim.
+input.image_attachments: "📎 الصور: %{items}"  # {Locked="📎","%{items}"}
+
+# ── نافذة الأوامر المنبثقة (src/ui/command_popup.rs) ─────────────────────────────────
+# {Locked="/"} - بادئة أمر الشرطة المائلة، يجب أن تبقى ASCII
+commands.popup_title: " / الأوامر "
+commands.help_title: " المساعدة "
+commands.help_header: "أوامر الشرطة المائلة — اكتب / في مربع الإدخال."
+commands.help_escape_hint: "  //text     إرسال '/' حرفيًا (يتجاوز محلل الأوامر)"  # {Locked="//text","/"}
+commands.help_close_hint: "  Esc        إغلاق هذه المساعدة"  # {Locked="Esc"}
+
+# Slash-command summaries shown in the popup and /help overlay.
+# Command names (/help, /clear, /new, /restart, /stop, /sessions) stay in
+# English. Only the descriptions are localized.
+# {Locked="ACP","Ctrl+Shift+/"} - protocol name and shortcut, do not translate
+commands.help.summary: "إظهار قائمة الأوامر هذه"
+commands.clear.summary: "مسح سجل تمرير الدردشة (مع الاحتفاظ بالجلسة)"
+commands.new.summary: "بدء جلسة ACP جديدة (حذف السجل)"  # {Locked="ACP"}
+commands.fix.summary: "Diagnose the active terminal and suggest a fix (/fix <hint>)"  # {Locked="/fix","<hint>"}
+commands.restart.summary: "إعادة تشغيل عامل الذكاء الاصطناعي"
+commands.stop.summary: "إلغاء الأمر قيد التنفيذ"
+commands.sessions.summary: "فتح منتقي الجلسات التاريخية (Ctrl+Shift+/)"  # {Locked="Ctrl+Shift+/"}
+commands.agent.summary: "اختر عامل لعلامة التبويب هذه (/agent <id> للتبديل مباشرةً)"  # {Locked="/agent","<id>"}
+
+# ── لوحة التوصيات (src/ui/recommendations.rs) ───────────────────────────────
+# {Locked="Enter","Esc","↵","↑","↓","←","→"} - أسماء المفاتيح ورمز مفتاح الإدخال، لا تترجمها
+recommendations.nav_hint: "(↑ ↓ للتنقل • ← → للتبديل بين الأزرار • Enter للتحديد • Esc للإلغاء)"
+recommendations.button_run_command: "[ تشغيل الأمر ]"
+recommendations.button_insert_in_terminal: "إدراج في الطرفية"
+recommendations.button_open_in_new_tab: "فتح في علامة تبويب جديدة ↵"
+recommendations.button_open_in_new_panel: "فتح في لوحة جديدة ↵"
+recommendations.button_open_tab: "فتح علامة تبويب ↵"
+recommendations.button_open_panel: "فتح لوحة ↵"
+recommendations.button_execute: "تنفيذ ↵"
+recommendations.agent_fallback: "عامل الذكاء الاصطناعي"
+recommendations.open_and_send_display: "%{agent}: %{input}"
+recommendations.open_kind_tab: "علامة تبويب"
+recommendations.open_kind_panel: "لوحة"
+recommendations.open_kind_panel_direction: "لوحة (%{direction})"
+recommendations.open_new_with_title_and_cwd: "%{kind} جديد (%{title}) في %{cwd}"
+recommendations.open_new_with_title: "%{kind} جديد (%{title})"
+recommendations.open_new_with_cwd: "%{kind} جديد في %{cwd}"
+recommendations.open_new_empty: "%{kind} فارغ جديد"
+
+# ── مربع حوار الأذونات في الوضع المضغوط (src/ui/permission.rs) ───────────────────────
+permission.compact.default_description: "تم طلب الإذن"
+permission.compact.prefix: "[!] "  # {Locked}
+permission.compact.hint: "[Y/N للإجابة · غيّر الحجم لعرض البطاقة الكاملة]"  # {Locked="Y/N"}
+
+# ── حالة عامل الذكاء الاصطناعي (src/agent_check.rs) ───────────────────────────────────────
+agent.status.not_found: "غير موجود"
+# {Locked="winget","GitHub.Copilot","GitHub","Copilot"} - أسماء الأدوات والأمر، يجب تشغيلها كما هي
+agent.install.running_winget: "جارٍ التشغيل: winget install GitHub.Copilot"
+agent.install.launch_failed: "فشل في تشغيل winget: %{error}"
+agent.install.winget_exited: "خرج winget بشكل غير متوقع: %{error}"
+agent.install.winget_failed_code: "فشل تثبيت winget (رمز الخروج %{code})"
+agent.install.unsupported: "التثبيت التلقائي غير مدعوم لـ %{agent}"
+agent.custom.auth_hint: "تأكد من أن %{name} مثبّت وموجود في PATH."  # {Locked="PATH"}
+
+# ── عرض عوامل الذكاء الاصطناعي (src/ui/agents_view.rs) ─────────────────────────────────────
+agents.loading: "جارٍ التحميل..."
+# {Locked="Enter","Esc","F5","↑","↓","/"} - مجموعات المفاتيح، لا تترجمها
+agents.footer_hint: "(↑ ↓ للتنقل • Enter لبدء جلسة • Esc للخروج • F5 للتحديث • / للبحث)"
+agents.status.active: "نشط"
+agents.status.waiting_for_input: "في انتظار الإدخال"
+agents.status.error: "خطأ"
+agents.status.idle: "خامل"
+
+# ── تلميح ترحيب التخطيط (src/ui/layout.rs) ──────────────────────────────────
+layout.welcome_hint: "  (Ctrl+Shift+. لإظهار/إخفاء لوحة عامل الذكاء الاصطناعي • Ctrl+Shift+/ لإظهار/إخفاء جلسة عامل الذكاء الاصطناعي)"  # {Locked="Ctrl+Shift+.","Ctrl+Shift+/"}
+
+# ── حالة الاتصال ────────────────────────────────────────────────────────
+# Preparing the AI agent connection, including preflight and reuse of a cached agent.
+connection.starting: "جارٍ إعداد الاتصال بوكيل الذكاء الاصطناعي..."
+connection.reconnecting: "جارٍ إعادة الاتصال..."
+# Retiring old AI agent sessions for /restart, before the next connection phases.
+connection.restarting: "جارٍ إعادة تشغيل وكيل الذكاء الاصطناعي..."
+# Connecting the pane to WTA's local coordinator process, not to an AI model.
+connection.coordinator: "جارٍ الاتصال بالمنسق المحلي..."
+# Initializing the helper/coordinator connection, including local preparation and AI agent initialization.
+connection.initializing: "جارٍ تهيئة الاتصال بوكيل الذكاء الاصطناعي..."
+# Refreshing the user's authentication with the AI agent after login; not verifying the agent's identity.
+connection.authenticating: "جارٍ مصادقة المستخدم لدى وكيل الذكاء الاصطناعي..."
+# Reading the coordinator's registry snapshot, including existing history; not fetching history from the AI agent.
+connection.syncing_sessions: "جارٍ قراءة قائمة الجلسات..."
+# Creating the AI agent session, including local registration; internal agent progress is unknown.
+connection.creating_session: "جارٍ إنشاء جلسة وكيل الذكاء الاصطناعي..."
+# Applying the requested AI model before the connection is ready. Preserve %{model}.
+connection.selecting_model: "جارٍ تعيين نموذج الجلسة: %{model}..."  # {Locked="%{model}"}
+# Activity row while connecting to restore a conversation. Keep the actual stage first so narrow panes show it; session_id is shortened to eight characters.
+connection.resuming_stage: "%{stage} (جارٍ استئناف %{session_id})"  # {Locked="%{stage}","%{session_id}"}
+connection.connecting_activity: "جارٍ الاتصال بعامل الذكاء الاصطناعي…"
+connection.lost: "فُقد الاتصال بعامل الذكاء الاصطناعي. اكتب /restart لإعادة الاتصال."  # {Locked="/restart"}
+
+# ── رسائل النظام (src/app.rs) ────────────────────────────────────────────────
+system.close_pane_hint: "اضغط Ctrl+C مرة أخرى لإغلاق اللوحة"  # {Locked="Ctrl+C"}
+system.selection_copied: "تم النسخ"  # Brief hint shown after selected terminal text is copied
+system.cancelled: "تم الإلغاء."
+system.no_prompt_in_flight: "لا يوجد أمر قيد التنفيذ."
+system.authentication_failed: "فشلت المصادقة"
+system.stopped_max_tokens: "تم اقتطاع الرد بعد بلوغ حد إخراج النموذج."
+system.stopped_max_turn_requests: "توقف الوكيل بعد بلوغ حد الطلبات لهذه الجولة."
+system.stopped_refusal: "رفض الوكيل متابعة هذا الطلب."
+system.agent_busy: "العامل مشغول في علامة التبويب هذه — انتظر حتى ينتهي الطلب الحالي."
+# Image paste messages; "agent" refers to an AI agent. Keep Enter and %{label} verbatim.
+system.image_clipboard_empty: "لا توجد صورة في الحافظة للصقها."
+system.image_not_supported: "عامل الذكاء الاصطناعي هذا لا يدعم إدخال الصور."
+system.image_pasted: "تم إرفاق الصورة (%{label}). اضغط Enter للإرسال."  # {Locked="%{label}","Enter"}
+system.resuming_session: "جارٍ استئناف الجلسة %{session_id}..."
+system.unknown_command: "أمر غير معروف \"%{command}\" — تم إرساله كطلب. اكتب /help لعرض القائمة."  # {Locked="/help"} — slash-command name.
+system.busy_use_stop: "انتظر حتى ينتهي الطلب الحالي، أو استخدم /stop أولًا."  # {Locked="/stop"} — slash-command name.
+system.cannot_focus_session: "يتعذر التركيز على الجلسة %{session_id}: تبدو نشطة، لكن لم يتم ربط GUID للوحة بعد. حاول مرة أخرى بعد قليل."
+system.cannot_resume_no_load_session: "يتعذر الاستئناف في لوحة العامل: لم يعلن %{agent} عن إمكانية ACP `loadSession`."  # {Locked="ACP","loadSession"} — protocol/UI terms.
+system.cannot_resume_no_resume_flag: "يتعذر استئناف جلسة %{agent}: لا يحتوي هذا العامل على علامة بنمط `--resume`."  # {Locked="--resume"} — flag and UI terms.
+system.cannot_resume_unknown_agent: "يتعذر استئناف الجلسة %{session_id}: عامل المصدر غير معروف لهذا الإصدار من WTA."
+system.cannot_resume_phantom_via_flag: "يتعذر استئناف جلسة %{agent} %{session_id}: بدأت لكنها لم تجمع أي محادثة، لذلك سيرفض %{agent} نفسه الاستئناف. تتم إزالة الصف."
+system.cannot_resume_phantom_via_load: "يتعذر استئناف جلسة %{agent} %{session_id}: بدأت لكنها لم تجمع أي محادثة، لذلك سيرفض %{agent} التحميل. تتم إزالة الصف."
+system.fallback.this_agent: "هذا العامل"
+system.fallback.connected_agent: "العامل المتصل"
+
+# ── مخرجات CLI في وقت التشغيل (src/main.rs) ────────────────────────────────────────
+output.no_windows: "لم يتم العثور على نوافذ."
+output.no_tabs: "لم يتم العثور على علامات تبويب."
+output.no_panes: "لم يتم العثور على لوحات."
+output.no_windows_in_list: "لم يتم العثور على نوافذ"
+output.no_tabs_in_window: "لم يتم العثور على علامات تبويب في النافذة %{window_id}"
+# {Locked="WINDOW_ID","TAB_ID","PANE_ID","PID","ACTIVE","ROWS","COLS","FOCUSED","TITLE"} - معرّفات الأعمدة، تُبقى بالأحرف اللاتينية للتحليل
+output.header.windows: "WINDOW_ID    TITLE                          FOCUSED"
+output.header.tabs: "TAB_ID     TITLE                          FOCUSED"
+output.header.panes: "PANE_ID    PID      ACTIVE   ROWS       COLS"
+output.active_pane: "اللوحة النشطة: %{pane} (علامة التبويب: %{tab}، النافذة: %{window})"
+output.pane_running: "قيد التشغيل (PID: %{pid})"  # {Locked="PID"}
+output.pane_exited: "خرج (الرمز: %{code}، PID: %{pid})"  # {Locked="PID"}
+output.created_tab: "تم إنشاء علامة التبويب %{tab_id} (اللوحة %{pane_id})"
+output.created_pane: "تم إنشاء اللوحة %{pane_id}"
+output.pane_closed: "تم إغلاق اللوحة %{pane_id}."
+
+# ── الأخطاء (src/main.rs + src/agent_check.rs) ───────────────────────────────
+error.no_active_pane: "لم يتم العثور على لوحة نشطة. استخدم -t لتحديد معرّف اللوحة."  # {Locked="-t"}
+error.wt_com_clsid_not_set: "WT_COM_CLSID غير معيّن. شغّله داخل لوحة Windows Terminal."  # {Locked="WT_COM_CLSID","Windows Terminal"}
+error.unknown_shell_type: "نوع shell غير معروف '%{shell}'. استخدم: bash، powershell، cmd، fish"  # {Locked="bash","powershell","cmd","fish"}
+# {Locked="wtcli wait-for"} - اسم الأمر، لا تترجمه
+error.wtcli_wait_for_spawn: "فشل في تشغيل wtcli wait-for"
+error.wtcli_wait_for_parse: "فشل في تحليل مخرجات wtcli wait-for"
+error.wtcli_wait_for_failed: "فشل wtcli wait-for: %{stderr}"
+
+# ── مخرجات حالة الخطافات (src/main.rs) ───────────────────────────────────────
+# {Locked="CLI","PATH","wt-agent-hooks","wta","wta hooks status","%LOCALAPPDATA%","IntelligentTerminal","wta-install-hooks.log"} - أسماء الأدوات/CLI، متغيرات البيئة، أسماء ملفات السجل
+hooks.bundle_source: "مصدر الحزمة: %{source}%{path_suffix}"
+hooks.cli_not_on_path: "✗ CLI ليس في PATH"
+hooks.installed: "✓ مثبّت"
+hooks.marketplace_path_stale: "⚠ مسار المتجر قديم"
+hooks.installed_but_disabled: "⚠ مثبّت ولكن معطّل"
+hooks.not_installed: "✗ غير مثبّت"
+hooks.uninstall_skipped: "تم التخطي (CLI ليس في PATH)"
+hooks.install_succeeded: "✓ تم تثبيت wt-agent-hooks لـ %{clis}"
+# ── Relative time and date formatting ───────────────────────────────────────
+time.just_now: "الآن"
+time.minute_singular: "منذ دقيقة واحدة"
+time.minutes_other: "منذ %{count} دقيقة"
+time.hour_singular: "منذ ساعة واحدة"
+time.hours_other: "منذ %{count} ساعة"
+time.day_singular: "منذ يوم واحد"
+time.days_other: "منذ %{count} يومًا"
+
+# ── تنفيذ التوصية (src/coordinator.rs) ───────────────────────────
+system.choice_execution_failed: "فشل الاختيار %{choice}: %{error}"
+
+# ── Agent picker (src/ui/agent_popup.rs) ────────────────────────────────────
+# {Locked="↑","↓","Enter","Esc"} - key names, do not translate
+agent_picker.title: "اختر عامل الذكاء الاصطناعي (↑ ↓ • Enter • Esc)"  # Agent means an AI coding agent
+# Shown when no policy-allowed AI agent CLI is installed on the machine.
+system.no_agents: "لم يتم العثور على واجهة سطر أوامر (CLI) لعامل ذكاء اصطناعي متاحة على هذا الجهاز."  # {Locked="CLI"}
+# {agent} is the unrecognized text the user typed after /agent.
+system.agent_unknown: "عامل غير معروف أو غير متوفر %{agent} — اكتب /agent لعرض القائمة المتاحة."  # {Locked="/agent"}
+# Shown only when /agent is used outside a Windows Terminal-owned agent pane.
+system.agent_switch_unavailable: "تبديل عامل الذكاء الاصطناعي غير متاح خارج علامة تبويب Windows Terminal."
+
+# ── Model picker (/model) ───────────────────────────────────────────────────
+commands.model.summary: "اختر النموذج لهذه اللوحة (/model <id> للتبديل مباشرةً)"  # {Locked="/model","<id>"}
+commands.config.summary: "تكوين جلسة عامل الذكاء الاصطناعي هذه"  # Agent means an AI coding agent; shown for the /config command. {Locked="/config"}
+commands.move.summary: "نقل لوحة عامل الذكاء الاصطناعي لعلامة التبويب هذه (/move <position>)"  # {Locked="/move","<position>"}
+model_picker.title: "اختر النموذج (↑ ↓ • Enter • Esc)"  # {Locked="↑","↓","Enter","Esc"}
+system.no_models: "لم يُعلن عامل الذكاء الاصطناعي المتصل عن أي نماذج قابلة للاختيار."
+system.model_set: "تم تعيين نموذج هذه اللوحة إلى %{model}."  # {Locked="%{model}"}
+
+# ── Session configuration picker (src/ui/config_popup.rs) ───────────────────
+# {Locked="↑","↓","Enter","Esc","ACP"} - key names and protocol name
+config_picker.title: "تكوين الجلسة (↑ ↓ • Enter • Esc)"
+# Shown when /config is used but the AI agent exposed no ACP select options.
+system.no_config_options: "لم يعلن عامل الذكاء الاصطناعي المتصل عن أي خيارات جلسة قابلة للتكوين."
+# {option} is an Agent-provided option name; {error} is the ACP error.
+system.config_update_failed: "فشل تحديث %{option}: %{error}"
+system.yolo_disable_pending: "لم يؤكد موفّر عامل الذكاء الاصطناعي أن الجلسة في الحالة المطلوبة دون امتيازات"  # Shown after the localized failure prefix while prompts remain blocked until the AI agent provider confirms that its privileged session mode is off. Provider means an AI agent provider, not a network provider.
+system.provider_command_blocked_by_policy: "%{command}: تم تعطيل الموافقة التلقائية بواسطة سياسة مؤسستك."  # {Locked="%{command}"} Shown when AllowAutomaticApproval blocks a provider-advertised privileged command.
+system.model_unknown: "نموذج غير معروف %{model} — اكتب /model لعرض القائمة المتاحة."  # {Locked="%{model}","/model"}
