@@ -1654,4 +1654,12 @@ In this context, "agent" refers to an AI agent (e.g. Copilot, Claude, Gemini), n
     <value>一時停止</value>
     <comment>Accessibility status for temporarily paused OSC 9;4 progress. A localized percentage is appended; this does not mean waiting for user input or approval.</comment>
   </data>
+  <data name="CopyAsCodeText" xml:space="preserve">
+    <value>コードとしてコピー</value>
+    <comment>Action that copies the selected terminal text as a fenced Markdown code block.</comment>
+  </data>
+  <data name="OpenLinkText" xml:space="preserve">
+    <value>リンクを開く</value>
+    <comment>Action shown when the selected terminal text is a valid HTTP or HTTPS URL. Opens the link in the system default browser.</comment>
+  </data>
 </root>

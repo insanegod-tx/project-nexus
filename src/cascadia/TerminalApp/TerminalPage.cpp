@@ -16349,6 +16349,24 @@ namespace winrt::TerminalApp::implementation
             return;
         }
 
+        const auto selectedText = withSelection ? control.SelectedText(true) : winrt::hstring{};
+        auto selectedTextIsWebUrl = false;
+        if (withSelection && !selectedText.empty() && std::wstring_view{ selectedText }.find_first_of(L" \t\r\n") == std::wstring_view::npos)
+        {
+            try
+            {
+                const Windows::Foundation::Uri uri{ selectedText };
+                const auto scheme = uri.SchemeName();
+                selectedTextIsWebUrl = !uri.Host().empty() &&
+                                       (til::equals_insensitive_ascii(scheme, L"http") ||
+                                        til::equals_insensitive_ascii(scheme, L"https"));
+            }
+            catch (const winrt::hresult_error&)
+            {
+                // Arbitrary selected text is not necessarily a well-formed URI.
+            }
+        }
+
         // Helper lambda for dispatching an ActionAndArgs onto the
         // ShortcutActionDispatch. Used below to wire up each menu entry to the
         // respective action.
@@ -16379,6 +16397,25 @@ namespace winrt::TerminalApp::implementation
             button.Label(label);
             button.Click(makeCallback(action));
             targetMenu.SecondaryCommands().Append(button);
+        };
+
+        auto makeCustomItem = [](const winrt::hstring& label,
+                                 const winrt::hstring& icon,
+                                 const auto& callback,
+                                 auto& targetMenu,
+                                 const bool primary) {
+            AppBarButton button{};
+
+            if (!icon.empty())
+            {
+                auto iconElement = UI::IconPathConverter::IconWUX(icon);
+                Automation::AutomationProperties::SetAccessibilityView(iconElement, Automation::Peers::AccessibilityView::Raw);
+                button.Icon(iconElement);
+            }
+
+            button.Label(label);
+            button.Click(callback);
+            (primary ? targetMenu.PrimaryCommands() : targetMenu.SecondaryCommands()).Append(button);
         };
 
         auto makeMenuItem = [](const winrt::hstring& label,
@@ -16534,7 +16571,89 @@ namespace winrt::TerminalApp::implementation
 
         if (withSelection)
         {
-            makeItem(RS_(L"SearchWebText"), L"\xF6FA", ActionAndArgs{ ShortcutAction::SearchForText, nullptr }, menu);
+            winrt::weak_ref<TermControl> weakControl{ control };
+            makeCustomItem(RS_(L"CopyAsCodeText"),
+                           L"Copy",
+                           [weakControl](auto&&, auto&&) {
+                               if (const auto target{ weakControl.get() })
+                               {
+                                   const auto selected = target.SelectedText(true);
+                                   if (selected.empty())
+                                   {
+                                       return;
+                                   }
+
+                                   try
+                                   {
+                                       std::wstring code{ selected };
+                                       size_t longestBacktickRun = 0;
+                                       size_t currentBacktickRun = 0;
+                                       for (const auto ch : code)
+                                       {
+                                           if (ch == L'`')
+                                           {
+                                               longestBacktickRun = std::max(longestBacktickRun, ++currentBacktickRun);
+                                           }
+                                           else
+                                           {
+                                               currentBacktickRun = 0;
+                                           }
+                                       }
+
+                                       const std::wstring fence(std::max<size_t>(3, longestBacktickRun + 1), L'`');
+                                       std::wstring fencedCode;
+                                       fencedCode.reserve(fence.size() * 2 + code.size() + 2);
+                                       fencedCode.append(fence).append(L"\n").append(code);
+                                       if (code.back() != L'\n')
+                                       {
+                                           fencedCode.push_back(L'\n');
+                                       }
+                                       fencedCode.append(fence);
+
+                                       DataPackage dataPackage;
+                                       dataPackage.SetText(fencedCode);
+                                       Clipboard::SetContent(dataPackage);
+                                       Clipboard::Flush();
+                                   }
+                                   catch (const winrt::hresult_error& e)
+                                   {
+                                       LOG_HR(e.code());
+                                   }
+
+                                   target.SelectionContextMenu().Hide();
+                               }
+                           },
+                           menu,
+                           true);
+            makeCustomItem(RS_(L"SearchWebText"),
+                           L"\xF6FA",
+                           [weak = get_weak(), weakControl](auto&&, auto&&) {
+                               if (const auto page{ weak.get() })
+                               {
+                                   if (const auto target{ weakControl.get() })
+                                   {
+                                       page->_actionDispatch->DoAction(target, ActionAndArgs{ ShortcutAction::SearchForText, nullptr });
+                                   }
+                               }
+                           },
+                           menu,
+                           true);
+            if (selectedTextIsWebUrl)
+            {
+                makeCustomItem(RS_(L"OpenLinkText"),
+                               L"\xE71B",
+                               [weak = get_weak(), weakControl, selectedText](auto&&, auto&&) {
+                                   if (const auto page{ weak.get() })
+                                   {
+                                       if (const auto target{ weakControl.get() })
+                                       {
+                                           page->_OpenHyperlinkHandler(target, Microsoft::Terminal::Control::OpenHyperlinkEventArgs{ selectedText });
+                                       }
+                                   }
+                               },
+                               menu,
+                               false);
+            }
         }
 
         makeItem(RS_(L"TabClose"), L"\xE711", ActionAndArgs{ ShortcutAction::CloseTab, CloseTabArgs{ _GetFocusedTabIndex().value() } }, menu);

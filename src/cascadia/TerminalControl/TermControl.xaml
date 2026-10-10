@@ -64,10 +64,6 @@
                           x:Uid="CopyCommandButton"
                           Click="_CopyCommandHandler"
                           Icon="Copy" />
-            <AppBarButton x:Name="PasteWithSelectionCommandButton"
-                          x:Uid="PasteWithSelectionCommandButton"
-                          Click="_PasteCommandHandler"
-                          Icon="Paste" />
             <mux:CommandBarFlyout.SecondaryCommands>
                 <AppBarButton x:Name="SelectCommandWithSelectionButton"
                               x:Uid="SelectCommandWithSelectionButton"
