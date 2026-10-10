@@ -1157,10 +1157,10 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
-    void TerminalPage::_HandleSearchForText(const IInspectable& /*sender*/,
+    void TerminalPage::_HandleSearchForText(const IInspectable& sender,
                                             const ActionEventArgs& args)
     {
-        if (const auto termControl{ _GetActiveControl() })
+        if (const auto termControl{ _senderOrActiveControl(sender) })
         {
             if (termControl.HasSelection())
             {
